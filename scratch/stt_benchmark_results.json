@@ -1,0 +1,29 @@
+[
+  {
+    "language": "English Financial",
+    "duration": 10.462,
+    "batch_latency_ms": 1518.165700006648,
+    "streaming_interim_ms": 2191.8832999945153,
+    "streaming_post_speech_ms": 4006.811299987021,
+    "batch_transcript": "What is the minimum CIBIL score required for a personal loan of 15 lakh weight GSE and ISI? And what is the monthly ME?",
+    "streaming_transcript": "What is the minimum CIBIL score required for a personal loan of 15 lakh weight"
+  },
+  {
+    "language": "Hindi Financial",
+    "duration": 8.62025,
+    "batch_latency_ms": 1292.572399994242,
+    "streaming_interim_ms": 2148.997700001928,
+    "streaming_post_speech_ms": 4006.515400003991,
+    "batch_transcript": "15 left, personal loan, CIBIL score, or",
+    "streaming_transcript": ""
+  },
+  {
+    "language": "Marathi Financial",
+    "duration": 8.4245,
+    "batch_latency_ms": 1334.3980999925407,
+    "streaming_interim_ms": 2096.6490999999223,
+    "streaming_post_speech_ms": 3934.7458999982337,
+    "batch_transcript": "Henlock Rue Payanchi a car job CIBIL score kidi logado ani dara maha emit kidi aiso",
+    "streaming_transcript": "Henlock, Rue, Panchia, CIBIL score, Kidi Logado, Ani, Dara, Maha, Imi,"
+  }
+]

@@ -1,0 +1,49 @@
+[
+  {
+    "label": "English Financial (CIBIL, 15 lakh, EMI, HDFC)",
+    "duration_s": 6.79,
+    "before_latency_ms": 2483.2,
+    "after_interim_ms": 1551.3,
+    "after_latency_ms": 315.0,
+    "speedup": 7.88,
+    "before_transcript": "What is the minimum CIBIL score required for a personal loan of 15 lakh with HDFC Bank, and what is the monthly EMI?",
+    "after_transcript": "What is the minimum CIBIL score required for a personal loan of 15 lakh, HDFC Bank, and what is the monthly EMI?",
+    "expected_terms": [
+      "CIBIL",
+      "15 lakh",
+      "EMI",
+      "loan",
+      "HDFC"
+    ]
+  },
+  {
+    "label": "Hindi Financial (15 लाख, सिबिल, ईएमआई)",
+    "duration_s": 5.65,
+    "before_latency_ms": 2250.8,
+    "after_interim_ms": 1844.4,
+    "after_latency_ms": 313.3,
+    "speedup": 7.19,
+    "before_transcript": "15 lakh की personal loan की CIBIL score कितना होना चाहिए और monthly MA कितनी आएगी?",
+    "after_transcript": "15 lakh की personal loan CIBIL score कितना होना चाहिए? और monthly",
+    "expected_terms": [
+      "15 lakh",
+      "CIBIL score",
+      "personal loan"
+    ]
+  },
+  {
+    "label": "Marathi Financial (10 लाख, सिबिल, कर्ज, ईएमआई)",
+    "duration_s": 5.7,
+    "before_latency_ms": 2817.9,
+    "after_interim_ms": 1744.9,
+    "after_latency_ms": 417.9,
+    "speedup": 6.74,
+    "before_transcript": "10 लाख रुपयेंचे personal loansafaisiple score किती लाख तो आणि ड्रमा हा एमिक किती ऐसो?",
+    "after_transcript": "10 लाख रुपयेंचे personal loan सॅफ AiCIPOScore किती ऐकतो आणि ड्रामा आम्ही किती असो",
+    "expected_terms": [
+      "10 लाख",
+      "personal loan",
+      "CIBIL"
+    ]
+  }
+]

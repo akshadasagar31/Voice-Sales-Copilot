@@ -1,0 +1,121 @@
+[
+  {
+    "title": "English",
+    "lang_code": "en",
+    "input_text": "My CIBIL score is 750, can I get a 5 lakh personal loan from HDFC Bank with low EMI?",
+    "http_transcript": "My CIBIL score is 7 50. Can I get a 5 lakh personal loan from HDFC Bank with low EMI?",
+    "http_conf": 0.9912,
+    "http_latency_ms": 2077.8,
+    "ws_transcript": "My CIBIL score is 750,",
+    "ws_post_speech_latency_ms": 4017.7,
+    "first_interim_ms": 1959.8,
+    "term_accuracy_pct": 100.0,
+    "terms_checked": {
+      "CIBIL": true,
+      "750": true,
+      "5": true,
+      "lakh": true,
+      "personal loan": true,
+      "HDFC": true,
+      "EMI": true
+    }
+  },
+  {
+    "title": "Hindi",
+    "lang_code": "hi",
+    "input_text": "मेरा सिबिल स्कोर 750 है, क्या मुझे HDFC बैंक से 5 लाख का पर्सनल लोन और कम ईएमआई मिल सकती है?",
+    "http_transcript": "मेरा CIBIL score सात सौ पचास है. क्या मुझे HDFC Bank से पांच लाख का personal loan और कम EMI मिल सकती है?",
+    "http_conf": 1.0,
+    "http_latency_ms": 1480.5,
+    "ws_transcript": "मेरा CIBIL score सात सौ पचास है.",
+    "ws_post_speech_latency_ms": 4013.1,
+    "first_interim_ms": 1854.1,
+    "term_accuracy_pct": 100.0,
+    "terms_checked": {
+      "CIBIL": true,
+      "750": true,
+      "5": true,
+      "लाख": true,
+      "HDFC": true,
+      "EMI": true
+    }
+  },
+  {
+    "title": "Marathi - Personal Loan & CIBIL",
+    "lang_code": "mr",
+    "input_text": "माझा CIBIL स्कोर 750 आहे, मला HDFC बँकेकडून 5 लाख रुपयांचे वैयक्तिक कर्ज हवे आहे, मासिक ईएमआय किती असेल?",
+    "http_transcript": "माझा CIBIL score सातशे पन्नास आहे. मला HDFC बँकेकडून पाच लाख रुपयांचे वैयक्तिक कर्ज हवे आहे. मासिक EMI किती असेल?",
+    "http_conf": 0.9854,
+    "http_latency_ms": 1816.9,
+    "ws_transcript": "माझा CIBI LSco सातशे पन्नास आहे,",
+    "ws_post_speech_latency_ms": 4001.2,
+    "first_interim_ms": 1932.1,
+    "term_accuracy_pct": 100.0,
+    "terms_checked": {
+      "CIBIL": true,
+      "750": true,
+      "HDFC": true,
+      "बँकेकडून": true,
+      "लाख": true,
+      "वैयक्तिक कर्ज": true,
+      "मासिक EMI": true
+    }
+  },
+  {
+    "title": "Marathi - Home Loan & Interest Rate",
+    "lang_code": "mr",
+    "input_text": "SBI बँक 8.5 टक्के व्याजदराने 20 लाख रुपयांचे गृहकर्ज देते का?",
+    "http_transcript": "SBI bank आठ पूर्णांक पाच दशांश टक्के व्याज दराने वीस लाख रुपयांचे गृह कर्ज देते का?",
+    "http_conf": 0.9653,
+    "http_latency_ms": 7659.3,
+    "ws_transcript": "SBI Bank आठ पूर्णांक पाच दशाम",
+    "ws_post_speech_latency_ms": 4003.9,
+    "first_interim_ms": 2010.6,
+    "term_accuracy_pct": 100.0,
+    "terms_checked": {
+      "SBI": true,
+      "टक्के": true,
+      "व्याज": true,
+      "20": true,
+      "लाख": true,
+      "गृहकर्ज": true
+    }
+  },
+  {
+    "title": "Marathi - Documents & Salary",
+    "lang_code": "mr",
+    "input_text": "वैयक्तिक कर्जासाठी कोणती कागदपत्रे लागतील? माझा पगार दरमहा 50 हजार रुपये आहे.",
+    "http_transcript": "वैयक्तिक कर्जासाठी कोणती कागदपत्रे लागतील? माझा पगार दरमहा पन्नास हजार रुपये आहे.",
+    "http_conf": 0.9941,
+    "http_latency_ms": 1831.1,
+    "ws_transcript": "वैयक्तिक कर्जासाठी कोणती कागदपत्रे लागतील?",
+    "ws_post_speech_latency_ms": 4013.2,
+    "first_interim_ms": 1890.4,
+    "term_accuracy_pct": 100.0,
+    "terms_checked": {
+      "वैयक्तिक कर्ज": true,
+      "कागदपत्रे": true,
+      "पगार": true,
+      "दरमहा": true,
+      "50": true,
+      "हजार": true
+    }
+  },
+  {
+    "title": "Marathi - Business Loan & Crore",
+    "lang_code": "mr",
+    "input_text": "मला 1 कोटी रुपयांचे व्यवसाय कर्ज हवे आहे, परतफेडीचा कालावधी किती असेल?",
+    "http_transcript": "मला एक कोटी रुपयांचे व्यवसाय कर्ज हवे आहे, परत फीडीचा कालावधी किती असेल?",
+    "http_conf": 0.9761,
+    "http_latency_ms": 2533.3,
+    "ws_transcript": "मला एक कोटी रुपयांचे व्यवसाय कर्ज हवे आहे,",
+    "ws_post_speech_latency_ms": 4003.9,
+    "first_interim_ms": 2118.6,
+    "term_accuracy_pct": 100.0,
+    "terms_checked": {
+      "कोटी": true,
+      "व्यवसाय कर्ज": true,
+      "कालावधी": true
+    }
+  }
+]
