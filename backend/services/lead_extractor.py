@@ -129,10 +129,11 @@ def extract_phone_number(text: str) -> Optional[str]:
     """Extracts a valid 10-digit Indian phone number from text if present."""
     if not text:
         return None
-    match = re.search(r"(?:(?:\+?91[\s\-]?)|\b)([6-9]\d{9})\b", text)
+    normalized_text = normalize_spoken_numbers(text)
+    match = re.search(r"(?:(?:\+?91[\s\-]?)|\b)([6-9]\d{9})\b", normalized_text)
     if match:
         return match.group(1)
-    digit_match = re.search(r"(?:(?:\+?91[\s\-]?)|\b)([6-9](?:[\s\-]*\d){9})\b", text)
+    digit_match = re.search(r"(?:(?:\+?91[\s\-]?)|\b)([6-9](?:[\s\-]*\d){9})\b", normalized_text)
     if digit_match:
         digits = re.sub(r"\D", "", digit_match.group(1))
         if len(digits) == 10 and digits[0] in "6789":
@@ -194,7 +195,8 @@ def extract_loan_amount(text: str, context_field: Optional[str] = None) -> Optio
     """Extracts loan amount from English, Hindi, or Marathi speech."""
     if not text:
         return None
-    lower = text.lower().strip()
+    normalized = normalize_spoken_numbers(text)
+    lower = normalized.lower().strip()
 
     # If the text is purely a phone number (e.g. "9876543210", "+91 9876543210"), never match amount
     if re.match(r"^\s*(?:\+?91[\s\-]?)?[6-9]\d{9}\s*$", lower):
@@ -205,23 +207,23 @@ def extract_loan_amount(text: str, context_field: Optional[str] = None) -> Optio
     if not text_no_phone:
         return None
 
-    cr = re.search(r"(\d+(?:\.\d+)?)\s*(?:crores?|cr|करोड़|कोटी)\b", text_no_phone)
+    cr = re.search(r"(\d+(?:\.\d+)?)\s*(?:crores?|cr|करोड़|करोड|कोटी)(?:\b|\s|[.,;]|$)", text_no_phone)
     if cr:
         return float(cr.group(1)) * 10000000.0
 
-    lakh = re.search(r"(\d+(?:\.\d+)?)\s*(?:lakhs?|lacs?|lac|लाख|l\b)", text_no_phone)
+    lakh = re.search(r"(\d+(?:\.\d+)?)\s*(?:lakhs?|lacs?|lac|लाख|l)(?:\b|\s|[.,;]|$)", text_no_phone)
     if lakh:
         return float(lakh.group(1)) * 100000.0
 
-    million = re.search(r"(\d+(?:\.\d+)?)\s*(?:millions?|m\b)", text_no_phone)
+    million = re.search(r"(\d+(?:\.\d+)?)\s*(?:millions?|m)(?:\b|\s|[.,;]|$)", text_no_phone)
     if million:
         return float(million.group(1)) * 1000000.0
 
-    k = re.search(r"(\d+(?:\.\d+)?)\s*(?:thousands?|k|हजार)\b", text_no_phone)
+    k = re.search(r"(\d+(?:\.\d+)?)\s*(?:thousands?|k|हजार|हज़ार)(?:\b|\s|[.,;]|$)", text_no_phone)
     if k:
         return float(k.group(1)) * 1000.0
 
-    curr_amt = re.search(r"(?:rs\.?|inr|₹|amount|रुपये|रक्कम)\s*[:=]?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d+)?|\d{4,8})\b", text_no_phone)
+    curr_amt = re.search(r"(?:rs\.?|inr|₹|amount|रुपये|रक्कम|रकम|राशि)\s*[:=]?\s*(\d{1,3}(?:,\d{2,3})*(?:\.\d+)?|\d{4,8})\b", text_no_phone)
     if curr_amt:
         v = curr_amt.group(1).replace(",", "")
         try:
@@ -252,7 +254,8 @@ INVALID_NAME_REGEX = re.compile(
     r"want|wants|wanted|wanting|need|needs|needed|needing|looking|interested|apply|applying|require|requires|"
     r"चाहिए|चाहिये|हवे|हवा|पाहिजे|लागेल|द्या|मिळेल|देना|लेना|chahiye|chaahiye|pahije|havay|have|dena|lena|mala|mujhe|"
     r"personal|business|home|housing|car|auto|gold|education|mortgage|"
-    r"cibil|emi|roi|interest|rate|tenure|duration|amount|salary|rupees|rs|lakh|crore|thousand|हजार|लाख|करोड़|करोड|कोटी|रुपये|"
+    r"cibil|emi|roi|interest|rate|tenure|duration|amount|salary|rupees|rs|lakh|crore|thousand|हजार|हज़ार|लाख|करोड़|करोड|कोटी|रुपये|रक्कम|रकम|राशि|"
+    r"month|months|महीने|महिने|माह|mahina|mahine|year|years|साल|वर्ष|वर्षे|अवधि|कालावधी|मुदत|"
     r"hello|hi|hey|namaste|namaskar|good\s*morning|good\s*afternoon|good\s*evening|नमस्ते|नमस्कार|"
     r"yes|no|ok|okay|sure|please|thanks|thank\s*you|धन्यवाद|होय|नाही|"
     r"what|who|whom|whose|which|why|where|when|how|can|could|should|would|are|you|your|is|do|does|tell|help|"
@@ -266,17 +269,21 @@ INVALID_NAME_REGEX = re.compile(
 def is_valid_prospect_name(name: Optional[str]) -> bool:
     """
     Validates that a string is a legitimate personal name and NOT a loan-intent phrase,
-    request, greeting, financial term, or conversational statement.
+    tenure duration, spoken number, financial term, question, or conversational statement.
     """
     if not name or not isinstance(name, str):
         return False
     clean = name.strip()
     if not clean or len(clean) < 2 or len(clean) > 40:
         return False
-    if INVALID_NAME_REGEX.search(clean):
+    # Check if assistant conversation question
+    if is_assistant_query(clean):
         return False
-    # If contains digits or special symbols, not a person's name
-    if re.search(r"[\d@#$%^*=_\+\[\]{}<>/\\|]", clean):
+    # Check if spoken numbers convert to digits or contain digits
+    norm = normalize_spoken_numbers(clean)
+    if re.search(r"[\d@#$%^*=_\+\[\]{}<>/\\|?]", norm) or re.search(r"[\d@#$%^*=_\+\[\]{}<>/\\|?]", clean):
+        return False
+    if INVALID_NAME_REGEX.search(clean) or INVALID_NAME_REGEX.search(norm):
         return False
     # Must have between 1 and 4 words
     words = clean.split()
@@ -412,9 +419,10 @@ def extract_tenure_months(text: str, context_field: Optional[str] = None) -> Opt
     """Extracts loan tenure duration in months from English, Hindi, or Marathi speech."""
     if not text:
         return None
-    lower = text.lower().strip()
+    normalized = normalize_spoken_numbers(text)
+    lower = normalized.lower().strip()
 
-    # 1. If context_field is "tenure_months" and user gives raw integer
+    # 1. If context_field is "tenure_months" and user gives raw integer or spoken number
     if context_field == "tenure_months":
         num_m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*$", lower)
         if num_m:
@@ -425,7 +433,7 @@ def extract_tenure_months(text: str, context_field: Optional[str] = None) -> Opt
                 return int(val)
 
     # Years to months: e.g. "2 years", "3 yrs", "1.5 years", "2 साल", "3 वर्ष", "2 वर्षे", "5 वर्षांसाठी"
-    yr_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?|yr|साल|वर्ष|वर्षांसाठी|वर्षे)(?:\s+|$|[.,;]|\b)", lower)
+    yr_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:years?|yrs?|yr|साल|वर्ष|वर्षांसाठी|वर्षे)(?:\b|\s|[.,;]|$)", lower)
     if yr_match:
         try:
             yrs = float(yr_match.group(1))
@@ -434,7 +442,7 @@ def extract_tenure_months(text: str, context_field: Optional[str] = None) -> Opt
             pass
 
     # Months: e.g. "24 months", "36 months", "12 महीने", "24 महिने", "36 महिन्यांसाठी", "माह"
-    mo_match = re.search(r"(\d+)\s*(?:months?|mos?|mo|महीने|महिने|महिन्यांसाठी|माह)(?:\s+|$|[.,;]|\b)", lower)
+    mo_match = re.search(r"(\d+)\s*(?:months?|mos?|mo|महीने|महिने|महिन्यांसाठी|माह|mahina|mahine)(?:\b|\s|[.,;]|$)", lower)
     if mo_match:
         try:
             return int(mo_match.group(1))
@@ -442,7 +450,7 @@ def extract_tenure_months(text: str, context_field: Optional[str] = None) -> Opt
             pass
 
     # Explicit tenure keywords: e.g. "tenure 36", "tenure of 24", "अवधि 36", "कालावधी 24"
-    ten_match = re.search(r"(?:tenure|duration|अवधि|कालावधी|मुदत)\s*(?:is|of|:)?\s*(\d+)(?:\s+|$|[.,;]|\b)", lower)
+    ten_match = re.search(r"(?:tenure|duration|अवधि|कालावधी|मुदत)\s*(?:is|of|:)?\s*(\d+)(?:\b|\s|[.,;]|$)", lower)
     if ten_match:
         try:
             val = int(ten_match.group(1))
@@ -581,6 +589,208 @@ def get_missing_parameter_prompt(
     return "Thank you! Please share your details."
 
 
+def merge_lead_safely(
+    existing: Optional[Dict[str, Any]],
+    incoming: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Deterministically merges incoming lead updates into existing lead.
+    CRITICAL RULE: Never overwrite correctly stored, non-null, valid fields
+    with None, empty, uncertain, or invalid data.
+    """
+    merged: Dict[str, Any] = dict(existing) if existing and isinstance(existing, dict) else {}
+    if not incoming or not isinstance(incoming, dict):
+        return merged
+
+    for k in REQUIRED_LEAD_FIELDS + ["email", "role", "notes"]:
+        if k not in incoming:
+            continue
+        new_val = incoming.get(k)
+        if new_val is None:
+            continue
+        if isinstance(new_val, str) and not new_val.strip():
+            continue
+
+        # Field-specific validation before accepting update
+        if k == "name":
+            if is_valid_prospect_name(str(new_val)):
+                merged["name"] = str(new_val).strip()
+        elif k == "phone":
+            clean_phone = extract_phone_number(str(new_val))
+            if clean_phone:
+                merged["phone"] = clean_phone
+            elif re.match(r"^[6-9]\d{9}$", str(new_val).strip()):
+                merged["phone"] = str(new_val).strip()
+        elif k == "loan_type":
+            if isinstance(new_val, str) and len(new_val.strip()) >= 3:
+                existing_lt = merged.get("loan_type")
+                if not (existing_lt and existing_lt != "Loan" and new_val.strip() == "Loan"):
+                    merged["loan_type"] = new_val.strip()
+        elif k == "loan_amount":
+            try:
+                amt = float(new_val)
+                if amt > 0:
+                    merged["loan_amount"] = amt
+            except (ValueError, TypeError):
+                pass
+        elif k == "tenure_months":
+            try:
+                ten = int(new_val)
+                if 1 <= ten <= 360:
+                    merged["tenure_months"] = ten
+            except (ValueError, TypeError):
+                pass
+        elif k == "company":
+            clean_c = str(new_val).strip()
+            if len(clean_c) >= 2 and clean_c.lower() not in {"loan", "personal", "home", "business", "unknown", "none", "null"}:
+                merged["company"] = clean_c
+        elif k == "email":
+            clean_e = extract_email(str(new_val))
+            if clean_e:
+                merged["email"] = clean_e
+        else:
+            merged[k] = new_val
+
+    return merged
+
+
+CLARIFICATION_PROMPTS: Dict[str, Dict[str, List[str]]] = {
+    "name": {
+        "en": [
+            "I couldn't quite catch your name. Could you please share your full name again?",
+            "Sorry, I missed that. May I have your name, please?",
+            "Could you kindly repeat your full name for me?",
+        ],
+        "hi": [
+            "माफ़ी चाहता हूँ, मुझे आपका नाम ठीक से समझ नहीं आया। क्या आप कृपया अपना पूरा नाम दोबारा बता सकते हैं?",
+            "क्षमा करें, मुझे आपका नाम स्पष्ट नहीं हुआ। कृपया अपना शुभ नाम एक बार फिर बताइए?",
+            "कृपया अपना नाम एक बार फिर दोहराएंगे?",
+        ],
+        "mr": [
+            "माफ करा, मला आपले नाव नीट ऐकू आले नाही. कृपया आपले पूर्ण नाव पुन्हा सांगाल का?",
+            "क्षमस्व, मला आपले नाव स्पष्ट समजले नाही. कृपया आपले नाव पुन्हा सांगा?",
+            "कृपया आपले नाव पुन्हा एकदा सांगू शकाल का?",
+        ],
+    },
+    "phone": {
+        "en": [
+            "I didn't quite catch the phone number. Could you please repeat your 10-digit mobile number?",
+            "Sorry, I missed the contact number. Could you kindly share your 10-digit phone number again?",
+            "Could you please state your 10-digit mobile number once more?",
+        ],
+        "hi": [
+            "माफ़ी चाहता हूँ, मुझे आपका फोन नंबर ठीक से समझ नहीं आया। क्या आप कृपया अपना 10 अंकों का मोबाइल नंबर दोबारा बता सकते हैं?",
+            "क्षमा करें, फोन नंबर स्पष्ट नहीं हुआ। कृपया अपना 10 अंकों का संपर्क नंबर एक बार फिर बताएंगे?",
+            "कृपया अपना मोबाइल नंबर स्पष्ट रूप से दोबारा बताएं?",
+        ],
+        "mr": [
+            "माफ करा, मला आपला फोन नंबर नीट समजला नाही. कृपया आपला 10 अंकी मोबाईल नंबर पुन्हा सांगाल का?",
+            "क्षमस्व, संपर्क नंबर स्पष्ट झाला नाही. कृपया आपला मोबाईल नंबर पुन्हा एकदा सांगा?",
+            "कृपया आपला 10 अंकी फोन नंबर स्पष्टपणे पुन्हा सांगू शकाल का?",
+        ],
+    },
+    "company": {
+        "en": [
+            "I didn't quite catch the organization name. Could you please mention the company or employer you work for?",
+            "Sorry, which company or institution are you currently working with? Could you repeat the name?",
+            "Could you kindly clarify your current employer or company name?",
+        ],
+        "hi": [
+            "माफ़ी चाहता हूँ, मुझे आपकी कंपनी का नाम ठीक से समझ नहीं आया। आप किस कंपनी या संस्थान में काम करते हैं?",
+            "क्षमा करें, आपकी कंपनी का नाम स्पष्ट नहीं हुआ। कृपया अपने संस्थान या कंपनी का नाम दोबारा बताएं?",
+            "कृपया अपनी कंपनी का नाम एक बार फिर बताएंगे?",
+        ],
+        "mr": [
+            "माफ करा, मला आपल्या कंपनीचे नाव नीट समजले नाही. आपण कोणत्या कंपनीत किंवा संस्थेत काम करता?",
+            "क्षमस्व, कंपनीचे नाव स्पष्ट झाले नाही. कृपया आपल्या संस्थेचे किंवा कंपनीचे नाव पुन्हा सांगाल का?",
+            "कृपया आपण कार्यरत असलेल्या कंपनीचे नाव पुन्हा सांगा?",
+        ],
+    },
+    "loan_type": {
+        "en": [
+            "I couldn't identify the loan type. Are you looking for a personal loan, home loan, or business loan?",
+            "Could you please clarify what category of loan you need, such as personal, home, or business?",
+            "Which type of loan would you like assistance with today?",
+        ],
+        "hi": [
+            "माफ़ी चाहता हूँ, लोन का प्रकार स्पष्ट नहीं हुआ। क्या आपको पर्सनल लोन, होम लोन या बिज़नेस लोन चाहिए?",
+            "कृपया स्पष्ट करेंगे कि आपको किस तरह का लोन चाहिए, जैसे कि पर्सनल, होम या बिज़नेस लोन?",
+            "आपको किस प्रकार के लोन की आवश्यकता है, कृपया दोबारा बताएं?",
+        ],
+        "mr": [
+            "माफ करा, कर्जाचा प्रकार स्पष्ट झाला नाही. आपल्याला वैयक्तिक कर्ज, गृह कर्ज की व्यवसाय कर्ज हवे आहे?",
+            "कृपया स्पष्ट कराल का की आपल्याला कोणत्या प्रकारचे कर्ज हवे आहे, जसे की पर्सनल, होम किंवा बिझनेस लोन?",
+            "आपल्याला नेमके कोणत्या प्रकारचे कर्ज हवे आहे, कृपया पुन्हा सांगा?",
+        ],
+    },
+    "loan_amount": {
+        "en": [
+            "I didn't catch the exact loan amount. Could you please specify how much loan amount you require?",
+            "Sorry, how much loan amount are you looking for? Could you please repeat the amount in rupees?",
+            "Could you kindly clarify the loan amount you need?",
+        ],
+        "hi": [
+            "माफ़ी चाहता हूँ, मुझे लोन की राशि ठीक से समझ नहीं आई। आपको कितने रुपये के लोन की आवश्यकता है?",
+            "क्षमा करें, लोन राशि स्पष्ट नहीं हुई। कृपया बताएं कि आपको कितनी राशि का लोन चाहिए?",
+            "कृपया अपेक्षित लोन राशि एक बार फिर बताएंगे?",
+        ],
+        "mr": [
+            "माफ करा, मला कर्जाची रक्कम नीट समजली नाही. आपल्याला किती रकमेचे कर्ज हवे आहे?",
+            "क्षमस्व, कर्जाची अपेक्षित रक्कम स्पष्ट झाली नाही. कृपया आपल्याला किती रकमेचे कर्ज हवे आहे ते पुन्हा सांगाल का?",
+            "कृपया आपल्याला किती कर्ज हवे आहे, ती रक्कम पुन्हा सांगा?",
+        ],
+    },
+    "tenure_months": {
+        "en": [
+            "I didn't quite catch the repayment period. How many months or years of tenure do you need?",
+            "Could you please specify the desired loan tenure in months or years once more?",
+            "Sorry, what duration (in months or years) would you like for the loan?",
+        ],
+        "hi": [
+            "माफ़ी चाहता हूँ, लोन की अवधि स्पष्ट नहीं हुई। आपको कितने महीनों या वर्षों के लिए लोन चाहिए?",
+            "क्षमा करें, समय-सीमा समझ नहीं आई। कृपया बताएं कि आप कितने समय (महीनों या सालों) के लिए लोन लेना चाहते हैं?",
+            "कृपया लोन चुकाने की अवधि (महीनों या वर्षों में) एक बार फिर बताएंगे?",
+        ],
+        "mr": [
+            "माफ करा, कर्जाचा कालावधी स्पष्ट झाला नाही. आपल्याला किती महिने किंवा वर्षांसाठी कर्ज हवे आहे?",
+            "क्षमस्व, परतफेडीची मुदत समजली नाही. कृपया किती कालावधीसाठी कर्ज हवे आहे ते पुन्हा सांगाल का?",
+            "कृपया कर्जाचा कालावधी (महिने किंवा वर्षांमध्ये) पुन्हा एकदा सांगा?",
+        ],
+    },
+}
+
+
+def get_clarification_prompt(
+    field: Optional[str],
+    raw_transcript: str = "",
+    lead_data: Optional[Dict[str, Any]] = None,
+    lang: str = "en",
+    attempt: int = 1,
+) -> str:
+    """
+    Generates a natural, polite, context-aware clarification for an unclear field.
+    Rotates dynamically across variations so it never hardcodes or repeats one fixed message.
+    """
+    if not field or field not in CLARIFICATION_PROMPTS:
+        return get_missing_parameter_prompt(field, lead_data, lang=lang)
+
+    norm_lang = (lang or "en").strip().lower()
+    if norm_lang.startswith("hi") or norm_lang == "hindi":
+        resolved_lang = "hi"
+    elif norm_lang.startswith("mr") or norm_lang == "marathi":
+        resolved_lang = "mr"
+    else:
+        resolved_lang = "en"
+
+    options = CLARIFICATION_PROMPTS[field].get(resolved_lang, CLARIFICATION_PROMPTS[field]["en"])
+    if not options:
+        return get_missing_parameter_prompt(field, lead_data, lang=lang)
+
+    seed = abs(hash(raw_transcript.strip())) if raw_transcript else 0
+    idx = (attempt + seed) % len(options)
+    return options[idx]
+
+
 class LeadExtractionError(Exception):
     """Base exception for lead extraction failures."""
     pass
@@ -709,6 +919,14 @@ class LeadExtractionRequest(BaseModel):
         default=None,
         description="Optional existing PostgreSQL lead ID to update instead of creating a duplicate.",
     )
+    is_interim: Optional[bool] = Field(
+        default=None,
+        description="Optional flag indicating whether this is an interim/partial STT transcript. If true, lead extraction is bypassed.",
+    )
+    is_final: Optional[bool] = Field(
+        default=None,
+        description="Optional flag indicating genuine final STT transcript.",
+    )
 
 
 class LeadExtractionResponse(BaseModel):
@@ -776,16 +994,19 @@ class LeadExtractorService:
         model: Optional[str] = None,
         existing_lead: Optional[Dict[str, Any]] = None,
         language: Optional[str] = None,
+        is_interim: Optional[bool] = None,
+        is_final: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Executes structured lead extraction:
 
         1. Validates input transcript is non-empty.
-        2. Checks if transcript is solely a greeting (bypasses LLM).
-        3. Validates OpenRouter API key is configured.
+        2. Rejects/ignores interim or non-final STT transcripts.
+        3. Checks if transcript is solely a greeting or assistant query (bypasses LLM).
         4. Sends extraction prompt to OpenRouter LLM (integrating existing_lead if present).
         5. Parses and validates response against Pydantic Lead model.
-        6. Returns structured lead dictionary.
+        6. Safely merges lead without overwriting valid data.
+        7. Returns structured lead dictionary.
         """
         clean_transcript = (transcript or "").strip()
         if not clean_transcript:
@@ -817,6 +1038,24 @@ class LeadExtractorService:
                 resp_lang = get_response_language(spoken_lang)
         else:
             resp_lang = get_response_language(spoken_lang)
+
+        # CRITICAL: Ignore interim / partial speech transcripts
+        if is_interim is True or is_final is False:
+            logger.info(f"[LeadExtractor] Ignoring interim transcript: '{clean_transcript}'")
+            lead_dict = Lead.model_validate(clean_existing).model_dump() if clean_existing else Lead().model_dump()
+            next_missing = get_next_missing_parameter(lead_dict)
+            return {
+                "status": "interim_ignored",
+                "is_interim": True,
+                "message": "",
+                "lead": lead_dict,
+                "next_missing_parameter": next_missing,
+                "is_complete": next_missing is None,
+                "detected_language": spoken_lang,
+                "language": resp_lang,
+                "model": target_model,
+                "transcript_length": len(clean_transcript),
+            }
 
         # Check if the speech turn is purely a greeting
         if is_greeting(clean_transcript):
@@ -1010,20 +1249,26 @@ class LeadExtractorService:
             if name_found:
                 extracted_dict["name"] = name_found
 
-        # Defensive programmatic merge: preserve existing non-null fields if LLM missed them
-        if clean_existing:
-            for k, v in clean_existing.items():
-                if k in extracted_dict and extracted_dict[k] is None and v is not None:
-                    extracted_dict[k] = v
+        # Deterministic safe merge: never overwrite valid stored fields with uncertain data
+        final_lead_dict = merge_lead_safely(clean_existing, extracted_dict)
 
-        # Final safety guarantee: if name from any source is invalid, revert to clean_existing name (if valid) or None
-        if extracted_dict.get("name") and not is_valid_prospect_name(extracted_dict["name"]):
-            extracted_dict["name"] = clean_existing.get("name") if (clean_existing and is_valid_prospect_name(clean_existing.get("name"))) else None
+        # Check if the user was asked for a specific field, but their answer was unclear / invalid
+        was_prior_unclear = False
+        if prior_missing and prior_missing in REQUIRED_LEAD_FIELDS:
+            prior_val = final_lead_dict.get(prior_missing)
+            prior_satisfied = prior_val is not None and (not isinstance(prior_val, str) or bool(prior_val.strip()))
+            newly_collected_any = any(
+                final_lead_dict.get(f) is not None and clean_existing.get(f) is None
+                for f in REQUIRED_LEAD_FIELDS
+            )
+            if not prior_satisfied and not newly_collected_any:
+                was_prior_unclear = True
 
-        validated_lead = Lead.model_validate(extracted_dict)
-        final_lead_dict = validated_lead.model_dump()
         next_missing = get_next_missing_parameter(final_lead_dict)
-        confirmation_msg = get_missing_parameter_prompt(next_missing, final_lead_dict, lang=resp_lang)
+        if was_prior_unclear:
+            confirmation_msg = get_clarification_prompt(prior_missing, clean_transcript, final_lead_dict, lang=resp_lang)
+        else:
+            confirmation_msg = get_missing_parameter_prompt(next_missing, final_lead_dict, lang=resp_lang)
 
         return {
             "status": "success",
@@ -1031,6 +1276,8 @@ class LeadExtractorService:
             "next_missing_parameter": next_missing,
             "is_complete": next_missing is None,
             "is_new_lead": is_reset_turn,
+            "is_unclear": was_prior_unclear,
+            "clarified_field": prior_missing if was_prior_unclear else None,
             "message": confirmation_msg,
             "detected_language": spoken_lang,
             "language": resp_lang,
@@ -1066,19 +1313,17 @@ class LeadExtractorService:
         existing_lead: Optional[Dict[str, Any]] = None,
         language: Optional[str] = None,
         lead_id: Optional[int] = None,
+        is_interim: Optional[bool] = None,
+        is_final: Optional[bool] = None,
     ) -> Generator[str, None, None]:
         """
         Continuous Voice Assistant Lead Stream (Single-Pass Optimized):
 
-        1. Checks for greeting and yields natural greeting tokens immediately if detected.
-        2. Dispatches a SINGLE OpenRouter DeepSeek streaming request that:
-           - Emits 1-2 concise spoken confirmation sentences first (streamed immediately via 'event: token').
-           - Outputs delimiter '<<<LEAD_JSON>>>'.
-           - Outputs structured lead JSON matching the schema.
-        3. Stream parser emits spoken tokens directly to frontend sentence tokenizer for immediate TTS.
-        4. When '<<<LEAD_JSON>>>' is reached, routes subsequent tokens to a JSON buffer.
-        5. Once stream finishes, validates lead with Pydantic and updates/persists to PostgreSQL.
-        6. Emits 'event: lead' and 'event: done' without having blocked audio playback.
+        1. Checks for interim/partial STT transcripts and bypasses extraction.
+        2. Checks for greeting and yields natural greeting tokens immediately if detected.
+        3. Checks for assistant queries and yields natural answers.
+        4. Extracts multiple fields, merges safely, and asks for next missing parameter or clarifying prompt.
+        5. Emits 'event: lead' and 'event: done' without having blocked audio playback.
         """
         clean_transcript = (transcript or "").strip()
         if not clean_transcript:
@@ -1112,6 +1357,15 @@ class LeadExtractorService:
         else:
             resp_lang = get_response_language(spoken_lang)
         lang = resp_lang
+
+        # CRITICAL: Bypass lead extraction for interim / partial speech transcripts
+        if is_interim is True or is_final is False:
+            logger.info(f"[LeadExtractor.stream] Ignoring interim transcript: '{clean_transcript}'")
+            lead_dict = Lead.model_validate(clean_existing).model_dump() if clean_existing else Lead().model_dump()
+            yield f"event: metadata\ndata: {json.dumps({'is_interim': True, 'status': 'interim_ignored'})}\n\n"
+            yield f"event: lead\ndata: {json.dumps({'lead': lead_dict, 'is_new_lead': False, 'lead_id': lead_id, 'is_interim': True})}\n\n"
+            yield f"event: done\ndata: {json.dumps({'answer': '', 'is_interim': True})}\n\n"
+            return
 
         # 1. Fast-path: Check if speech turn is solely a greeting
         if is_greeting(clean_transcript):
@@ -1224,44 +1478,57 @@ class LeadExtractorService:
                 prior_missing = get_next_missing_parameter(clean_existing)
 
                 # 2. Extract multiple fields from transcript with context
-                immediate_lead = dict(clean_existing)
+                extracted_this_turn: Dict[str, Any] = {}
 
                 phone_found = extract_phone_number(clean_transcript)
                 if phone_found:
-                    immediate_lead["phone"] = phone_found
+                    extracted_this_turn["phone"] = phone_found
 
                 email_found = extract_email(clean_transcript)
                 if email_found:
-                    immediate_lead["email"] = email_found
+                    extracted_this_turn["email"] = email_found
 
                 comp_found = extract_company(clean_transcript, context_field=prior_missing)
                 if comp_found:
-                    immediate_lead["company"] = comp_found
+                    extracted_this_turn["company"] = comp_found
 
                 lt_found = extract_loan_type(clean_transcript, context_field=prior_missing)
                 if lt_found:
-                    immediate_lead["loan_type"] = lt_found
+                    extracted_this_turn["loan_type"] = lt_found
 
                 amt_found = extract_loan_amount(clean_transcript, context_field=prior_missing)
                 if amt_found:
-                    immediate_lead["loan_amount"] = amt_found
+                    extracted_this_turn["loan_amount"] = amt_found
 
                 tenure_found = extract_tenure_months(clean_transcript, context_field=prior_missing)
                 if tenure_found:
-                    immediate_lead["tenure_months"] = tenure_found
+                    extracted_this_turn["tenure_months"] = tenure_found
 
                 name_found = extract_name(clean_transcript, context_field=prior_missing)
                 if name_found and is_valid_prospect_name(name_found):
-                    immediate_lead["name"] = name_found
+                    extracted_this_turn["name"] = name_found
 
-                # Preserve clean_existing fields if not updated
-                for k, v in clean_existing.items():
-                    if immediate_lead.get(k) is None and v is not None:
-                        immediate_lead[k] = v
+                # Safely merge into clean_existing (never overwrite existing valid fields)
+                immediate_lead = merge_lead_safely(clean_existing, extracted_this_turn)
+
+                # Check if input was unclear for prior_missing
+                was_prior_unclear = False
+                if prior_missing and prior_missing in REQUIRED_LEAD_FIELDS:
+                    prior_val = immediate_lead.get(prior_missing)
+                    prior_satisfied = prior_val is not None and (not isinstance(prior_val, str) or bool(prior_val.strip()))
+                    newly_collected_any = any(
+                        immediate_lead.get(f) is not None and clean_existing.get(f) is None
+                        for f in REQUIRED_LEAD_FIELDS
+                    )
+                    if not prior_satisfied and not newly_collected_any:
+                        was_prior_unclear = True
 
                 # 3. Determine next missing parameter statefully (skips all already collected fields!)
                 next_missing = get_next_missing_parameter(immediate_lead)
-                immediate_sentence1 = get_missing_parameter_prompt(next_missing, immediate_lead, lang=resp_lang)
+                if was_prior_unclear:
+                    immediate_sentence1 = get_clarification_prompt(prior_missing, clean_transcript, immediate_lead, lang=resp_lang)
+                else:
+                    immediate_sentence1 = get_missing_parameter_prompt(next_missing, immediate_lead, lang=resp_lang)
 
                 # 4. Synchronously sync lead_id with database so it is guaranteed across multi-turn
                 synced_lead_id = lead_id
@@ -1370,22 +1637,8 @@ class LeadExtractorService:
                 logger.warning(f"[LeadExtractor.stream] Fallback lead extraction warning: {ext_fallback_err}")
                 extracted_lead_dict = Lead().model_dump()
 
-        # Merge clean_existing fields into extracted_lead_dict
-        if clean_existing and isinstance(extracted_lead_dict, dict):
-            for k, v in clean_existing.items():
-                if k in extracted_lead_dict and extracted_lead_dict[k] is None and v is not None:
-                    extracted_lead_dict[k] = v
-
-        # Validate with authoritative Pydantic model
-        try:
-            validated_lead_obj = Lead.model_validate(extracted_lead_dict)
-            extracted_lead = validated_lead_obj.model_dump()
-        except Exception as val_err:
-            logger.warning(f"[LeadExtractor.stream] Lead Pydantic validation warning: {val_err}")
-            extracted_lead = extracted_lead_dict
-
-        if extracted_lead.get("name") and not is_valid_prospect_name(extracted_lead["name"]):
-            extracted_lead["name"] = clean_existing.get("name") if (clean_existing and is_valid_prospect_name(clean_existing.get("name"))) else None
+        # Deterministically merge existing fields safely
+        extracted_lead = merge_lead_safely(clean_existing, extracted_lead_dict)
 
         # Determine next missing parameter statefully
         next_missing = get_next_missing_parameter(extracted_lead)

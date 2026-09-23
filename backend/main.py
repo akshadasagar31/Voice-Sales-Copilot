@@ -87,6 +87,8 @@ from services.lead_extractor import (
     extract_tenure_months,
     extract_name,
     is_valid_prospect_name,
+    merge_lead_safely,
+    get_clarification_prompt,
 )
 import uuid
 from services.lead_repository import (
@@ -1472,6 +1474,22 @@ async def extract_lead_from_transcript(request: LeadExtractionRequest):
             detail="Transcript cannot be empty or whitespace.",
         )
 
+    # CRITICAL: Bypass lead extraction for interim / partial speech transcripts
+    if request.is_interim is True or request.is_final is False:
+        logger.info(f"[api/extract-lead] Ignoring interim STT transcript: '{clean_transcript}'")
+        clean_existing = request.existing_lead or {}
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": "interim_ignored",
+                "is_interim": True,
+                "message": "",
+                "lead": clean_existing,
+                "next_missing_parameter": get_next_missing_parameter(clean_existing),
+                "is_complete": False,
+            },
+        )
+
     try:
         extractor = LeadExtractorService()
 
@@ -1483,6 +1501,8 @@ async def extract_lead_from_transcript(request: LeadExtractionRequest):
                     existing_lead=request.existing_lead,
                     language=request.language,
                     lead_id=request.lead_id,
+                    is_interim=request.is_interim,
+                    is_final=request.is_final,
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -1497,6 +1517,8 @@ async def extract_lead_from_transcript(request: LeadExtractionRequest):
             model=request.model,
             existing_lead=request.existing_lead,
             language=request.language,
+            is_interim=request.is_interim,
+            is_final=request.is_final,
         )
         return JSONResponse(status_code=status.HTTP_200_OK, content=result)
     except ValueError as ve:
