@@ -17,21 +17,20 @@
 # ============================================================================
 
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
-# Supported Language Codes
+# Supported Language Codes - Exactly 3 languages: English, Hindi, Marathi
 LANG_EN = "en"
 LANG_HI = "hi"
 LANG_MR = "mr"
-LANG_MIXED = "mixed"
+LANG_MIXED = "mixed"  # Deprecated alias preserved for backward compatibility
 
-SUPPORTED_LANGUAGES = [LANG_EN, LANG_HI, LANG_MR, LANG_MIXED]
+SUPPORTED_LANGUAGES = [LANG_EN, LANG_HI, LANG_MR]
 
 LANGUAGE_NAMES = {
     LANG_EN: "English",
     LANG_HI: "Hindi",
     LANG_MR: "Marathi",
-    LANG_MIXED: "Mixed (Hindi/Marathi/English)",
 }
 
 
@@ -51,14 +50,15 @@ MARATHI_WORDS = {
     "शकता", "शकतो", "पहा", "नवीन", "सर्व", "असे", "तसे", "फार", "खूप",
     "हॅलो", "सुप्रभात", "शुभ", "सकाळ", "संध्याकाळ", "दुपार", "धन्यवाद",
     "कृपया", "कर्ज", "व्याजदर", "कागदपत्रे", "पात्रता", "निकष", "योजना",
-    "कालावधी", "नियम", "अटी", "काही", "इथे", "तिथे", "कोण", "कधी",
+    "कालावधी", "मुदत", "नियम", "अटी", "काही", "इथे", "तिथे", "कोण", "कधी",
     "मला", "माझा", "माझी", "माझे", "माझ्या", "तुला", "तुझा", "तुझी", "तुझे",
     "आम्हाला", "आमचा", "आमची", "आमचे", "कडून", "किती", "मिळेल", "मिळू",
     "असेल", "असेलच", "होते", "होता", "होती", "बँकेकडून", "बँकेच्या", "बँकेत",
     "दरमहा", "मासिक", "वैयक्तिक", "कर्जासाठी", "किमान", "आवश्यक",
-    "नाव", "नांव", "हवे", "हवा", "हवी", "रुपये", "लाख", "कोटी", "हजार",
-    "महिने", "वर्ष", "वर्षे", "पॅन", "आधार", "बँक", "खाते", "पगार",
-    "नोकरी", "व्यवसाय", "कंपनी", "आणि", "मी"
+    "नाव", "नांव", "हवे", "हवं", "हवा", "हवी", "रुपये", "लाख", "कोटी", "हजार",
+    "महिने", "वर्ष", "वर्षे", "महिन्यांसाठी", "वर्षांसाठी", "पॅन", "आधार", "बँक", "खाते", "पगार",
+    "नोकरी", "व्यवसाय", "कंपनी", "आणि", "मी", "पाटील", "कदम", "देशमुख", "जोशी", "कुलकर्णी",
+    "पवार", "शिंदे", "गायकवाड", "जाधव", "मोरे", "सावंत", "चव्हाण", "भोसले"
 }
 
 # Lexical markers for Hindi
@@ -70,30 +70,15 @@ HINDI_WORDS = {
     "होगा", "होगी", "होंगे", "होना", "होता", "होती", "होते", "कितना", "कितने", "कितनी",
     "न्यूनतम", "अधिकतम", "बहुत", "अच्छा", "हेलो", "हाय", "सुप्रभात", "शुभ",
     "धन्यवाद", "कृपया", "ऋण", "ब्याज", "दस्तावेज", "शर्तें", "कहाँ", "कब", "प्रतिमाह",
-    "नाम", "मेरा", "मेरी", "मेरे", "मुझे", "हमें", "हम", "रुपये", "लाख",
-    "करोड़", "हजार", "महीने", "साल", "पर्सनल", "लोन", "खाता", "पैन",
-    "आधार", "वेतन", "नौकरी", "कंपनी", "बताइए", "और", "मैं"
+    "मेरा", "मेरी", "मेरे", "मुझे", "हमें", "हम", "साल", "पर्सनल", "लोन",
+    "वेतन", "नौकरी", "बताइए", "और", "मैं"
 }
 
-# Romanized / Transliterated markers
-ROMANIZED_HINDI = {
-    "namaste", "pranam", "aap", "kaise", "kya", "hai", "hain",
-    "bataye", "kripya", "dhanyawad", "batao", "chahiye", "kaunsa", "kaunsi",
-    "shukriya", "accha", "kaisi", "kaisa", "hamare", "humare", "mera", "meri",
-    "mere", "karo", "karna", "karenge", "mujhe", "naam", "main", "humein",
-    "aapka", "aapki", "aapke", "apna", "apni", "apne", "kitna", "kitne", "kitni",
-    "hoga", "hogi", "honge", "nahi", "nahin", "haan", "lekin", "liye",
-    "bataiye", "deejie", "deejiye"
-}
-
-ROMANIZED_MARATHI = {
-    "namaskar", "kasa", "kashi", "ahes", "aahes", "aahe", "aahet", "ahet", "mahit",
-    "sanga", "tumhi", "tumchi", "tumche", "krupaya", "dhanyavad", "pahije",
-    "kay", "kayat", "baddal", "savlat", "savlati", "dar", "mala", "kiti",
-    "amhi", "aamhi", "aapan", "kahi", "karaycha", "karayche", "maze", "naav",
-    "majha", "majhi", "majhe", "majhya", "aani", "ani", "kuthe", "kadhi",
-    "kon", "hava", "havi", "have", "dya", "kinva", "zale", "jhale", "karun"
-}
+# Romanized / Transliterated markers - Deprecated & removed per Devanagari-only rule
+ROMANIZED_HINDI = set()
+ROMANIZED_MARATHI = set()
+ROMANIZED_MARATHI_EXCLUSIVE = set()
+MARATHI_SURNAMES_ROMAN = set()
 
 # Common English core vocabulary to confirm English phrases with certainty
 ENGLISH_CORE_WORDS = {
@@ -145,6 +130,14 @@ EMPTY_KB_GREETINGS = {
     LANG_MR: "नमस्कार! व्हॉइस सेल्स कोपायलटमध्ये आपले स्वागत आहे. सध्या नॉलेज बेसमध्ये कोणतीही सेल्स प्लेबुक किंवा दस्तऐवज अपलोड केलेले नाहीत. अचूक उत्तरे आणि शिफारसी मिळविण्यासाठी कृपया प्लेबुक्स विभागात आपले दस्तऐवज अपलोड करा.",
 }
 
+# Standard courteous clarification prompts for low-confidence or unintelligible utterances
+CLARIFICATION_PROMPTS = {
+    LANG_EN: "I'm sorry, I didn't quite catch that. Could you please repeat?",
+    LANG_HI: "माफ़ कीजिए, मैं समझ नहीं पाया। क्या आप कृपया दोबारा दोहरा सकते हैं?",
+    LANG_MR: "क्षमस्व, मला समजले नाही. आपण कृपया पुन्हा सांगू शकाल का?",
+}
+
+
 
 def count_devanagari_chars(text: str) -> int:
     """Returns count of Unicode characters within the Devanagari block."""
@@ -183,119 +176,297 @@ def is_new_lead_intent(text: str) -> bool:
     return any(re.search(pat, lower, flags=re.IGNORECASE) for pat in NEW_LEAD_PATTERNS)
 
 
-def detect_spoken_language(text: str) -> str:
+def detect_spoken_language(text: str, requested_language: Optional[str] = None, confidence: float = 1.0) -> str:
     """
     Authoritative spoken language detector for sales copilot:
-    - Returns 'en' for pure English
-    - Returns 'hi' for pure Hindi
-    - Returns 'mr' for pure Marathi
-    - Returns 'mixed' for mixed Hindi/Marathi/English (Hinglish/code-switching)
+    Strictly supports exactly 3 languages: 'en', 'hi', 'mr'.
+    - Returns 'mr' for Marathi (Devanagari text with Marathi characters/vocabulary/markers)
+    - Returns 'hi' for Hindi (Devanagari text with Hindi vocabulary/markers)
+    - Returns 'en' for English (Latin text verified with acceptable confidence and English vocabulary)
+    Devanagari text with >= 1 Devanagari character is evaluated for Marathi vs Hindi.
+    Latin-only text is verified for English and does not use Romanized Indic guessing.
     """
     clean_text = (text or "").strip()
     if not clean_text:
-        return LANG_EN
+        return requested_language if requested_language in (LANG_HI, LANG_MR) else LANG_EN
 
     devanagari_count = count_devanagari_chars(clean_text)
-    total_alpha = sum(1 for ch in clean_text if ch.isalpha())
-
-    # Words in Devanagari and Latin
-    words_dev = set(re.findall(r"[\u0900-\u097F]+", clean_text))
     words_latin = [w.lower() for w in re.findall(r"[a-zA-Z]+", clean_text)]
-    words_latin_set = set(words_latin)
-
+    words_dev = set(re.findall(r"[\u0900-\u097F]+", clean_text))
     en_grammar_hits = sum(1 for w in words_latin if w in ENGLISH_GRAMMAR_WORDS)
-    en_core_hits = sum(1 for w in words_latin if w in ENGLISH_CORE_WORDS)
-    mr_roman_hits = sum(1 for w in words_latin if w in ROMANIZED_MARATHI)
-    hi_roman_hits = sum(1 for w in words_latin if w in ROMANIZED_HINDI)
 
-    # 1. Check if Devanagari script is present (>= 2 characters)
-    if devanagari_count >= 2 and (total_alpha == 0 or (devanagari_count / total_alpha) > 0.15):
-        # Check for mixed script code-switching (Devanagari + English grammatical phrases)
-        if en_grammar_hits >= 1 and (en_core_hits >= 2 or len(words_latin) >= 3):
-            return LANG_MIXED
+    marathi_markers = {
+        "आहे", "आहेत", "नाही", "नाहीत", "हवे", "हवं", "हवा", "हवी", "पाहिजे", "नाव", "मला", "माझे", "माझं",
+        "माझा", "माझी", "मी", "बोलतोय", "बोलतेय", "नमस्कार", "कर्ज", "कालावधी", "वर्षांसाठी", "महिन्यांसाठी",
+        "रुपयांचे", "रुपयेंचे", "लाखांचे", "मिळेल", "लागेल", "किती", "द्या", "सांगा", "होय", "हो", "पाटील",
+        "कदम", "देशमुख", "पवार", "शिंदे", "गायकवाड", "जाधव", "मोरे", "सावंत", "आणि", "लागतो", "लागतात", "असो"
+    }
+    hindi_markers = {
+        "है", "हैं", "नहीं", "चाहिए", "मुझे", "मेरा", "मेरी", "मेरे", "नमस्ते", "हाँ", "लोन", "ऋण",
+        "बताएं", "बताओ", "दीजिए", "होगा", "होगी", "होंगे", "होना", "होनी", "होने", "चाहेगा", "चाहेगी",
+        "कितना", "कितने", "कितनी", "और", "क्या", "कैसे", "कैसी"
+    }
+    has_indic_marker = any(w in (marathi_markers | hindi_markers) for w in words_dev)
 
+    # 1. If English grammatical sentence structure is dominant and no Indic markers exist (e.g. en-IN STT writing "लाख" in English sentences)
+    if not has_indic_marker and en_grammar_hits >= 2 and len(words_latin) > len(words_dev) * 2:
+        return LANG_EN
+
+    # 2. Any presence of Devanagari script (supports short utterances like "हो", "नाही", "ना", "काय", "है", "हाँ", "मी")
+    if devanagari_count >= 1:
         has_mr_char = any(ch in MARATHI_SPECIFIC_CHARS for ch in clean_text)
         mr_score = sum(1 for w in words_dev if w in MARATHI_WORDS)
         hi_score = sum(1 for w in words_dev if w in HINDI_WORDS)
-
-        # Check if Hindi and Marathi are mixed together
-        marathi_markers = {"आहे", "आहेत", "नाही", "नाहीत", "हवे", "हवा", "हवी", "पाहिजे", "नाव", "मला", "माझे", "माझा", "माझी", "नमस्कार"}
-        hindi_markers = {"है", "हैं", "नहीं", "चाहिए", "नाम", "मुझे", "मेरा", "मेरी", "मेरे", "नमस्ते"}
         has_mr_marker = any(w in marathi_markers for w in words_dev)
         has_hi_marker = any(w in hindi_markers for w in words_dev)
-        if has_mr_marker and has_hi_marker:
-            return LANG_MIXED
 
-        if has_mr_char or mr_score > hi_score:
+        # Marathi-specific characters (ळ, ऱ) are conclusive proof of Marathi
+        if has_mr_char:
+            return LANG_MR
+
+        # Distinctive Marathi markers without Hindi markers
+        if has_mr_marker and not has_hi_marker:
+            return LANG_MR
+
+        # Distinctive Hindi markers without Marathi markers
+        if has_hi_marker and not has_mr_marker:
+            return LANG_HI
+
+        # Disambiguate when both or neither match
+        mr_tie = sum(1 for w in words_dev if w in marathi_markers)
+        hi_tie = sum(1 for w in words_dev if w in hindi_markers)
+        if mr_tie > hi_tie:
+            return LANG_MR
+        if hi_tie > mr_tie:
+            return LANG_HI
+
+        if mr_score > hi_score:
             return LANG_MR
         elif hi_score > mr_score:
             return LANG_HI
-        else:
-            mr_tie = sum(1 for w in words_dev if w in marathi_markers)
-            hi_tie = sum(1 for w in words_dev if w in hindi_markers)
-            if mr_tie > hi_tie:
-                return LANG_MR
-            if hi_tie > mr_tie:
-                return LANG_HI
-            if "नमस्कार" in words_dev:
-                return LANG_MR
-            if "नमस्ते" in words_dev:
-                return LANG_HI
+
+        if "नमस्कार" in words_dev:
+            return LANG_MR
+        if "नमस्ते" in words_dev:
             return LANG_HI
 
-    # 2. Latin / Roman script checks
-    # Check for code-mixing in Latin script (e.g. Hinglish / Marathish + English phrases)
-    has_indic_roman = (mr_roman_hits > 0 or hi_roman_hits > 0)
-    has_english_structure = (en_grammar_hits >= 1 or en_core_hits >= 2)
+        if requested_language in (LANG_MR, "mr-in", "marathi"):
+            return LANG_MR
+        if requested_language in (LANG_HI, "hi-in", "hindi"):
+            return LANG_HI
+        return LANG_MR if mr_score > hi_score else LANG_HI
 
-    # If both Romanized Indic and English structures are present -> mixed
-    if has_indic_roman and has_english_structure:
-        return LANG_MIXED
+    # 2. Latin / Non-Devanagari text
+    words_latin = [w.lower() for w in re.findall(r"[a-zA-Z]+", clean_text)]
+    total_alpha = sum(1 for ch in clean_text if ch.isalpha())
+    if total_alpha == 0:
+        if requested_language in (LANG_HI, LANG_MR):
+            return requested_language
+        return LANG_EN
 
-    # If both Hindi and Marathi Romanized markers are present -> mixed
-    if mr_roman_hits > 0 and hi_roman_hits > 0:
-        return LANG_MIXED
+    # Verify English words with confidence check (no Romanized Indic guessing)
+    en_core_hits = sum(1 for w in words_latin if w in ENGLISH_CORE_WORDS)
+    en_grammar_hits = sum(1 for w in words_latin if w in ENGLISH_GRAMMAR_WORDS)
 
-    # Pure Romanized Marathi
-    if mr_roman_hits > 0 and not has_english_structure:
+    # Classify as English if verified English vocabulary exists (no Romanized Indic guessing)
+    if (confidence >= 0.45 and (en_core_hits + en_grammar_hits) > 0) or en_core_hits >= 1 or en_grammar_hits >= 1:
+        return LANG_EN
+
+    # If user explicitly requested Marathi/Hindi in dropdown
+    if requested_language in (LANG_MR, "mr-in", "marathi"):
         return LANG_MR
-
-    # Pure Romanized Hindi
-    if hi_roman_hits > 0 and not has_english_structure:
+    if requested_language in (LANG_HI, "hi-in", "hindi"):
         return LANG_HI
 
-    # Pure English
+    # If confidence is insufficient and no English vocabulary was recognized,
+    # do NOT classify solely by script as English.
+    if confidence < 0.65 and (en_core_hits + en_grammar_hits) == 0:
+        return requested_language if requested_language in (LANG_HI, LANG_MR) else "unclear"
+
     return LANG_EN
 
 
-def get_response_language(detected_lang: str) -> str:
+def get_response_language(
+    detected_lang: str,
+    requested_language: Optional[str] = None,
+    text: Optional[str] = None,
+) -> str:
     """
     Authoritative response language resolution:
-    - Pure English -> English response ('en')
-    - Pure Hindi -> Hindi response ('hi')
-    - Pure Marathi -> Marathi response ('mr')
-    - Mixed Hindi/Marathi/English -> English response ('en')
+    Strictly supports exactly 3 languages:
+    - English -> English response ('en')
+    - Hindi -> Hindi response ('hi')
+    - Marathi -> Marathi response ('mr')
     """
     norm = (detected_lang or "").strip().lower()
-    if norm in (LANG_MIXED, "mixed"):
-        return LANG_EN
-    if norm in ("hi", "hi-in", "hindi"):
+    req_norm = (requested_language or "").strip().lower()
+
+    # 1. Explicit user language selection priority
+    if req_norm in ("mr", "mr-in", "marathi"):
+        return LANG_MR
+    if req_norm in ("hi", "hi-in", "hindi"):
         return LANG_HI
+    if req_norm in ("en", "en-in", "en-us", "english"):
+        return LANG_EN
+
+    # 2. Pure detected languages
     if norm in ("mr", "mr-in", "marathi"):
         return LANG_MR
+    if norm in ("hi", "hi-in", "hindi"):
+        return LANG_HI
+    if norm in ("en", "en-in", "en-us", "english"):
+        return LANG_EN
+
+    # 3. Fallback for legacy 'mixed' if ever passed from an external caller
+    if norm in (LANG_MIXED, "mixed"):
+        clean_text = (text or "").strip()
+        if clean_text:
+            return detect_spoken_language(clean_text, requested_language=requested_language)
+        if req_norm in ("hi", "hi-in", "hindi"):
+            return LANG_HI
+        if req_norm in ("mr", "mr-in", "marathi"):
+            return LANG_MR
+        return LANG_EN
+
     return LANG_EN
 
 
 def detect_language(text: str) -> str:
     """
     Returns 'en', 'hi', or 'mr' for general backward compatibility.
-    Mixed speech resolves to 'en'.
+    Mixed speech resolves to 'hi' or 'mr' based on markers, else 'en'.
     """
     spoken = detect_spoken_language(text)
-    return get_response_language(spoken)
+    return get_response_language(spoken, text=text)
 
 
 detect_text_language = detect_spoken_language
+
+
+MARATHI_DISTINCTIVE_WORDS = {
+    "आहे", "आहेत", "नाही", "नाहीत", "हवे", "हवं", "हवा", "हवी", "पाहिजे", "मला", "माझे", "माझं",
+    "माझा", "माझी", "मी", "बोलतोय", "बोलतेय", "नमस्कार", "कर्ज", "कालावधी", "मुदत", "वर्षांसाठी",
+    "महिन्यांसाठी", "रुपयांचे", "लाखांचे", "रुपयेंचे", "लाखेंचे", "मिळेल", "लागेल", "किती", "द्या", "सांगा", "होय",
+    "आणि", "आम्ही", "पाटील", "कदम", "देशमुख", "पवार", "शिंदे", "गायकवाड", "जाधव", "मोरे", "सावंत",
+    "हॅलो", "काय", "कसे", "कशी"
+}
+
+
+def select_best_multilingual_transcript(
+    candidates: Dict[str, Dict[str, Any]],
+    active_language: Optional[str] = None,
+) -> Tuple[str, str, float]:
+    """
+    Selects the winning candidate among concurrent STT streams ('en', 'hi', 'mr').
+    candidates format:
+      {
+         'en': {'transcript': str, 'confidence': float},
+         'hi': {'transcript': str, 'confidence': float},
+         'mr': {'transcript': str, 'confidence': float},
+      }
+    Returns: (winning_transcript, winning_lang, winning_conf)
+    """
+    mr_markers_all = MARATHI_WORDS | {
+        "आहे", "आहेत", "नाही", "नाहीत", "हवे", "हवं", "हवा", "हवी", "पाहिजे", "नाव", "मला", "माझे", "माझं",
+        "माझा", "माझी", "मी", "बोलतोय", "बोलतेय", "नमस्कार", "कर्ज", "कालावधी", "वर्षांसाठी", "महिन्यांसाठी",
+        "रुपयांचे", "रुपयेंचे", "लाखांचे", "मिळेल", "लागेल", "लागतो", "लागतात", "किती", "द्या", "सांगा", "होय", "हो",
+        "असो", "असावा", "असावे"
+    }
+    hi_markers_all = HINDI_WORDS | {
+        "है", "हैं", "नहीं", "चाहिए", "मुझे", "मेरा", "मेरी", "मेरे", "नमस्ते", "हाँ", "लोन", "ऋण",
+        "बताएं", "बताओ", "दीजिए", "होगा", "होगी", "होंगे", "होना", "कितना", "कितने", "कितनी",
+        "लाख", "रुपये", "हजार", "करोड़", "ब्याज", "किस्त", "महीने", "साल"
+    }
+
+    scored: List[Tuple[float, str, str, float]] = []
+
+    for lang, data in candidates.items():
+        tr = (data.get("transcript") or "").strip()
+        conf = float(data.get("confidence") or 0.0)
+        if not tr:
+            scored.append((-100.0, lang, "", 0.0))
+            continue
+
+        dev_chars = count_devanagari_chars(tr)
+        words_dev = set(re.findall(r"[\u0900-\u097F]+", tr))
+        words_latin = [w.lower() for w in re.findall(r"[a-zA-Z]+", tr)]
+
+        if lang == "mr":
+            has_mr_char = any(ch in MARATHI_SPECIFIC_CHARS for ch in tr)
+            mr_hits = sum(1 for w in words_dev if w in mr_markers_all)
+            if dev_chars >= 1:
+                # Require authentic Marathi markers or Marathi-specific characters
+                if has_mr_char:
+                    score = (conf * 1.8) + (mr_hits * 0.8) + 2.0
+                elif mr_hits >= 1:
+                    score = (conf * 1.8) + (mr_hits * 0.8)
+                else:
+                    # Devanagari without recognized Marathi vocabulary: raw confidence only
+                    score = conf * 1.0
+            else:
+                score = conf * 0.2
+            scored.append((score, "mr", tr, conf))
+
+        elif lang == "hi":
+            hi_hits = sum(1 for w in words_dev if w in hi_markers_all)
+            if dev_chars >= 1:
+                if hi_hits >= 1:
+                    score = (conf * 1.8) + (hi_hits * 0.8)
+                else:
+                    # Devanagari without recognized Hindi vocabulary: raw confidence only
+                    score = conf * 1.0
+            else:
+                score = conf * 0.2
+            scored.append((score, "hi", tr, conf))
+
+        else:  # en or en-IN
+            en_core = sum(1 for w in words_latin if w in ENGLISH_CORE_WORDS)
+            en_grammar = sum(1 for w in words_latin if w in ENGLISH_GRAMMAR_WORDS)
+            en_hits = en_core + en_grammar
+            has_indic = any(w in (mr_markers_all | hi_markers_all) for w in words_dev)
+            is_dominant_english = (not has_indic and en_grammar >= 2 and len(words_latin) > len(words_dev) * 2)
+
+            if dev_chars == 0 or is_dominant_english:
+                if conf < 0.50 and en_hits == 0:
+                    score = -10.0
+                else:
+                    # Strong scoring for authentic English speech
+                    pure_english_ratio = (en_core / len(words_latin)) if words_latin else 0.0
+                    score = (conf * 1.8) + min(2.0, en_hits * 0.35) + (1.0 if pure_english_ratio >= 0.7 else 0.0)
+            else:
+                score = conf * 0.2
+            scored.append((score, "en", tr, conf))
+
+    # Sort descending by calculated score
+    scored.sort(key=lambda x: x[0], reverse=True)
+    best_score, best_lang, best_tr, best_conf = scored[0]
+
+    # Shared vocabulary / tie-breaker resolution between Hindi and Marathi:
+    # Strictly evaluate current turn markers and confidence; zero inheritance from previous turns
+    if len(scored) >= 2 and scored[0][1] in ("mr", "hi") and scored[1][1] in ("mr", "hi"):
+        diff = abs(scored[0][0] - scored[1][0])
+        if diff <= 0.25:
+            mr_cand = next((s for s in scored if s[1] == "mr"), None)
+            hi_cand = next((s for s in scored if s[1] == "hi"), None)
+            if mr_cand and hi_cand:
+                mr_w = set(re.findall(r"[\u0900-\u097F]+", mr_cand[2]))
+                hi_w = set(re.findall(r"[\u0900-\u097F]+", hi_cand[2]))
+                mr_m_count = sum(1 for w in mr_w if w in mr_markers_all)
+                hi_m_count = sum(1 for w in hi_w if w in hi_markers_all)
+                if mr_m_count > hi_m_count:
+                    best_score, best_lang, best_tr, best_conf = mr_cand
+                elif hi_m_count > mr_m_count:
+                    best_score, best_lang, best_tr, best_conf = hi_cand
+                elif mr_cand[3] > hi_cand[3]:
+                    best_score, best_lang, best_tr, best_conf = mr_cand
+                elif hi_cand[3] > mr_cand[3]:
+                    best_score, best_lang, best_tr, best_conf = hi_cand
+
+    if not best_tr or best_score < 0.0:
+        return "", "unclear", 0.0
+
+    final_detected = detect_spoken_language(best_tr, requested_language=best_lang, confidence=best_conf)
+    return best_tr, final_detected, best_conf
 
 
 def select_best_stt_transcript(mr_text: str, multi_text: str) -> tuple[str, str, str]:
@@ -310,34 +481,86 @@ def select_best_stt_transcript(mr_text: str, multi_text: str) -> tuple[str, str,
     if not mr_text and not multi_text:
         return "", LANG_EN, "none"
     if not mr_text:
-        return multi_text, detect_language(multi_text), "multi_only"
+        lang = get_response_language(detect_spoken_language(multi_text), text=multi_text)
+        return multi_text, lang, "multi_only"
     if not multi_text:
-        return mr_text, detect_language(mr_text), "mr_only"
+        lang = get_response_language(detect_spoken_language(mr_text), text=mr_text)
+        return mr_text, lang, "mr_only"
 
-    mr_devanagari_words = set(re.findall(r"[\u0900-\u097F]+", mr_text))
-    multi_devanagari_words = set(re.findall(r"[\u0900-\u097F]+", multi_text))
+    multi_spoken = detect_spoken_language(multi_text)
+    multi_resp = get_response_language(multi_spoken, text=multi_text)
 
-    mr_hits = sum(1 for w in mr_devanagari_words if w in MARATHI_WORDS)
-    mr_has_char = any(ch in MARATHI_SPECIFIC_CHARS for ch in mr_text)
+    mr_dev_words = set(re.findall(r"[\u0900-\u097F]+", mr_text))
+    mr_distinct_hits = sum(1 for w in mr_dev_words if w in MARATHI_DISTINCTIVE_WORDS)
+    has_mr_char = any(ch in MARATHI_SPECIFIC_CHARS for ch in mr_text)
 
-    multi_hi_hits = sum(1 for w in multi_devanagari_words if w in HINDI_WORDS)
-    multi_mr_hits = sum(1 for w in multi_devanagari_words if w in MARATHI_WORDS)
+    # Core grammatical verbs and markers unique to Marathi phrasing
+    core_mr_grammar = {
+        "आहे", "आहेत", "नाही", "नाहीत", "हवे", "हवं", "हवा", "हवी", "पाहिजे",
+        "माझे", "माझं", "माझा", "माझी", "मी", "बोलतोय", "बोलतेय", "नमस्कार",
+        "कालावधी", "वर्षांसाठी", "महिन्यांसाठी", "रुपयांचे", "लाखांचे", "मिळेल",
+        "लागेल", "किती", "द्या", "सांगा", "होय", "काय", "कसे"
+    }
+    mr_grammar_hits = sum(1 for w in mr_dev_words if w in core_mr_grammar)
 
-    # 1. High confidence Marathi: specific Marathi characters (ळ, ऱ) OR strong Marathi lexical hits
-    if mr_has_char or (mr_hits >= 2 and mr_hits > multi_hi_hits):
-        return mr_text, LANG_MR, "Stream MR"
+    # When the dedicated Marathi stream (language="mr") has genuine Marathi markers,
+    # it is the authoritative transcript. The multilingual (code-mixing) stream must
+    # not override verbatim Marathi speech, names, or phone numbers.
+    if has_mr_char or mr_grammar_hits >= 1 or mr_distinct_hits >= 2:
+        return mr_text, LANG_MR, "Stream MR (Marathi)"
 
-    # 2. High confidence Hindi: multi stream has clear Hindi markers and MR lacks distinctive Marathi
-    if multi_hi_hits > 0 and multi_hi_hits >= mr_hits:
+    words_latin = [w.lower() for w in re.findall(r"[a-zA-Z]+", multi_text)]
+    en_grammar_hits = sum(1 for w in words_latin if w in ENGLISH_GRAMMAR_WORDS)
+    en_core_hits = sum(1 for w in words_latin if w in ENGLISH_CORE_WORDS)
+
+    mr_words_count = len(mr_text.split())
+    multi_words_count = len(multi_text.split())
+
+    # Check for phone numbers and numeric digit sequences
+    mr_digits = "".join(re.findall(r"\d", mr_text))
+    multi_digits = "".join(re.findall(r"\d", multi_text))
+
+    # 1. Entity Preservation: Check if one stream captured phone/numeric sequences that the other missed
+    has_long_phone_multi = len(multi_digits) >= 7 and len(multi_digits) > len(mr_digits)
+    has_long_phone_mr = len(mr_digits) >= 7 and len(mr_digits) > len(multi_digits)
+
+    if has_long_phone_multi and (mr_grammar_hits == 0 or len(multi_digits) >= 10):
+        return multi_text, multi_resp, f"Stream Multi (Preserved digits: {multi_resp})"
+
+    if has_long_phone_mr and (en_grammar_hits == 0 or len(mr_digits) >= 10):
+        return mr_text, LANG_MR, "Stream MR (Preserved digits: mr)"
+
+    # 2. English Priority: If multi_text is clearly English with grammatical structure,
+    # don't allow an isolated surname in the MR stream to override a full English sentence
+    is_clearly_english = (
+        multi_resp == LANG_EN
+        and (en_grammar_hits >= 2 or (en_grammar_hits >= 1 and en_core_hits >= 3))
+        and mr_grammar_hits == 0
+    )
+    if is_clearly_english:
+        return multi_text, LANG_EN, "Stream Multi (English)"
+
+    # 3. Hindi: If multi stream explicitly resolved to Hindi (Hindi / Hinglish speech)
+    if multi_resp == LANG_HI:
+        if mr_grammar_hits >= 2 or (mr_grammar_hits >= 1 and mr_distinct_hits >= 3):
+            return mr_text, LANG_MR, "Stream MR (Marathi)"
         return multi_text, LANG_HI, "Stream Multi (Hindi)"
 
-    # 3. If mr_hits >= 1 and multi has 0 Hindi markers:
-    if mr_hits >= 1 and multi_hi_hits == 0:
-        return mr_text, LANG_MR, "Stream MR"
+    # 4. Marathi: If MR text has genuine Marathi grammar or characters and is not an isolated 1-word fragment
+    if (has_mr_char or mr_grammar_hits >= 1 or mr_distinct_hits >= 2) and mr_words_count >= 2:
+        return mr_text, LANG_MR, "Stream MR (Marathi)"
 
-    # 4. English / Latin / Default:
-    lang = detect_language(multi_text)
-    return multi_text, lang, f"Stream Multi ({lang})"
+    # If multi_resp is Marathi and multi_text is substantive
+    if multi_resp == LANG_MR and multi_words_count >= mr_words_count:
+        return multi_text, LANG_MR, "Stream Multi (Marathi)"
+
+    # If mr_text has any Marathi markers and reasonable length relative to multi
+    if (has_mr_char or mr_distinct_hits >= 1) and mr_words_count >= max(2, multi_words_count // 2):
+        return mr_text, LANG_MR, "Stream MR (Marathi)"
+
+    # 5. Default to multi stream with its detected response language
+    return multi_text, multi_resp, f"Stream Multi ({multi_resp})"
+
 
 
 
@@ -361,6 +584,21 @@ def is_greeting(text: str) -> bool:
     if not words:
         return False
 
+    # Check for conversational pleasantries (e.g. "how are you", "how are you doing today")
+    pleasantry_patterns = [
+        r"^(hello|hi|hey|greetings|howdy)( there)?( (how are you|how re you|how r u)( doing)?( today)?)?$",
+        r"^(hello|hi|hey)( there)?( good (morning|afternoon|evening|day))?$",
+        r"^(how are you|how re you|how r u)( doing)?( today)?$",
+        r"^how('s| is) it going$",
+        r"^good (morning|afternoon|evening|day)$",
+        r"^(नमस्ते|नमस्कार|प्रणाम|हेलो|हाय|हैलो|हॅलो)( जी)?( (आप )?कैसे हैं|(आप )?कैसी हैं|आप कैसे हो)?$",
+        r"^(नमस्कार|हॅलो|हाय)( (तुम्ही )?कसे आहात|(तुम्ही )?कशी आहात)?$",
+        r"^(kaise ho|kese ho|kaise hain|kese hain|namaste|namaskar|kasa ahes|kase aahat)$"
+    ]
+    norm_space = " ".join(words)
+    if any(re.match(p, norm_space) for p in pleasantry_patterns):
+        return True
+
     # Check for question indicators / substantive domain words
     question_indicators = {
         "what", "why", "how", "when", "where", "who", "which", "can", "could",
@@ -381,8 +619,6 @@ def is_greeting(text: str) -> bool:
         GREETING_TOKENS_EN
         | GREETING_TOKENS_HI
         | GREETING_TOKENS_MR
-        | ROMANIZED_HINDI
-        | ROMANIZED_MARATHI
     )
 
     fillers = {
@@ -429,6 +665,12 @@ ASSISTANT_CAPABILITIES_RESPONSES = {
     LANG_MR: "मी आवाजाद्वारे ग्राहकांचे नाव, फोन नंबर, कंपनी, कर्जाची रक्कम आणि कालावधी यांसारखे तपशील थेट सीआरएममध्ये नोंदवून मदत करू शकतो.",
 }
 
+ASSISTANT_KNOWLEDGE_RESPONSES = {
+    LANG_EN: "I have comprehensive knowledge of loan products, interest rates, eligibility criteria, repayment tenure, and CRM sales lead capture. How may I assist you?",
+    LANG_HI: "मुझे लोन उत्पादों, ब्याज दरों, पात्रता शर्तों, लोन अवधि और सेल्स लीड प्रक्रिया की पूरी जानकारी है। आज मैं आपकी कैसे सहायता कर सकता हूँ?",
+    LANG_MR: "मला विविध कर्ज योजना, व्याजदर, पात्रता अटी, परतफेडीची मुदत आणि सेल्स लीड प्रक्रियेची सखोल माहिती आहे. आज मी आपल्याला कशी मदत करू शकतो?",
+}
+
 RE_ASSISTANT_NAME = re.compile(
     r"\b(?:what(?:'s|\s+is)\s+(?:your|ur)\s+name|tell\s+me\s+your\s+name|what\s+are\s+you\s+called|who\s+are\s+you\s+called|your\s+name\s+please)\b|"
     r"(?:आप(?:का)?\s*नाम\s*क्या|तुम्हारा\s*नाम\s*क्या|अपना\s*नाम\s*बता|नाम\s*क्या\s*है\s*आप)|"
@@ -450,6 +692,13 @@ RE_ASSISTANT_CAPABILITIES = re.compile(
     re.IGNORECASE,
 )
 
+RE_ASSISTANT_KNOWLEDGE = re.compile(
+    r"\b(?:what\s+(?:knowledge|info|information)\s+do\s+you\s+have|what\s+do\s+you\s+know(?:\s+about)?|what\s+is\s+your\s+knowledge(?:\s+base)?|tell\s+me\s+what\s+you\s+know|what\s+can\s+you\s+tell\s+me(?:\s+about)?|your\s+knowledge)\b|"
+    r"(?:आप(?:के)?\s*(?:पास|को)\s*(?:क्या|कितनी|कैसी)\s*(?:जानकारी|ज्ञान|नॉलेज)\s*(?:है|होती)|आप\s*क्या\s*जानते\s*हैं|आपको\s*क्या\s*पता\s*है|अपनी\s*जानकारी\s*(?:दीजिए|दें|दो|बताएं))|"
+    r"(?:तुमच्याकडे\s*(?:काय|कोणती)\s*(?:माहिती|ज्ञान|नॉलेज)\s*आहे|तुम्हाला\s*काय\s*(?:माहिती|ठाऊक|माहीत)\s*आहे|आपल्याकडे\s*कोणती\s*माहिती\s*आहे|आपली\s*माहिती\s*(?:द्या|सांगा))",
+    re.IGNORECASE,
+)
+
 
 def is_assistant_query(text: str) -> bool:
     """Checks if the user's speech is a general assistant query rather than lead data."""
@@ -460,28 +709,55 @@ def is_assistant_query(text: str) -> bool:
         RE_ASSISTANT_NAME.search(clean)
         or RE_ASSISTANT_IDENTITY.search(clean)
         or RE_ASSISTANT_CAPABILITIES.search(clean)
+        or RE_ASSISTANT_KNOWLEDGE.search(clean)
     )
 
 
-def get_assistant_query_response(text: str, language: str = LANG_EN) -> Optional[str]:
+def get_assistant_query_response(
+    text: str,
+    language: str = LANG_EN,
+    continuation_prompt: Optional[str] = None,
+    allow_llm: bool = True,
+) -> Optional[str]:
     """
-    Returns a natural assistant answer if the transcript is an assistant question
-    (e.g., 'What is your name?', 'Who are you?', 'What can you do?').
+    Returns a dynamic assistant answer generated by the active LLM if the transcript is an assistant question or general query.
+    Never hardcodes answers for specific questions.
+    If continuation_prompt is provided, appends it to naturally continue the lead flow.
     Returns None if the transcript is not an assistant query.
+    When allow_llm=False, only evaluates fast static identity patterns without making external LLM calls.
     """
     if not text or not isinstance(text, str):
         return None
     clean = text.strip()
     target_lang = language if language in (LANG_EN, LANG_HI, LANG_MR) else LANG_EN
 
-    if RE_ASSISTANT_NAME.search(clean):
-        return ASSISTANT_NAME_RESPONSES.get(target_lang, ASSISTANT_NAME_RESPONSES[LANG_EN])
-    if RE_ASSISTANT_IDENTITY.search(clean):
-        return ASSISTANT_IDENTITY_RESPONSES.get(target_lang, ASSISTANT_IDENTITY_RESPONSES[LANG_EN])
-    if RE_ASSISTANT_CAPABILITIES.search(clean):
-        return ASSISTANT_CAPABILITIES_RESPONSES.get(target_lang, ASSISTANT_CAPABILITIES_RESPONSES[LANG_EN])
+    if allow_llm:
+        try:
+            from services.lead_extractor import LeadExtractorService, is_general_question
+            if is_general_question(clean):
+                extractor = LeadExtractorService()
+                ans = extractor.answer_general_query(clean, language=target_lang, pending_field=None)
+                if ans:
+                    if continuation_prompt:
+                        return f"{ans} {continuation_prompt}".strip()
+                    return ans
+        except Exception as e:
+            logger.warning(f"[get_assistant_query_response] Exception in dynamic answer: {e}")
 
-    return None
+    base_answer = None
+    if RE_ASSISTANT_NAME.search(clean):
+        base_answer = ASSISTANT_NAME_RESPONSES.get(target_lang, ASSISTANT_NAME_RESPONSES[LANG_EN])
+    elif RE_ASSISTANT_IDENTITY.search(clean):
+        base_answer = ASSISTANT_IDENTITY_RESPONSES.get(target_lang, ASSISTANT_IDENTITY_RESPONSES[LANG_EN])
+    elif RE_ASSISTANT_CAPABILITIES.search(clean):
+        base_answer = ASSISTANT_CAPABILITIES_RESPONSES.get(target_lang, ASSISTANT_CAPABILITIES_RESPONSES[LANG_EN])
+    elif RE_ASSISTANT_KNOWLEDGE.search(clean):
+        base_answer = ASSISTANT_KNOWLEDGE_RESPONSES.get(target_lang, ASSISTANT_KNOWLEDGE_RESPONSES[LANG_EN])
+
+    if base_answer and continuation_prompt:
+        return f"{base_answer} {continuation_prompt}"
+
+    return base_answer
 
 
 def get_empty_kb_greeting(language: str) -> str:
@@ -736,6 +1012,42 @@ def devanagari_to_phonetic(text: str) -> str:
         "सर्व": "sarva",
         "नवीन": "naveen",
         "खूप": "khoop",
+        "साधेल": "saadhel",
+        "लवकरच": "lavkarch",
+        "संस्थेत": "sansthet",
+        "संस्थान": "sansthaan",
+        "नियोक्ता": "niyokta",
+        "कार्यरत": "kaaryarat",
+        "परतफेड": "paratfed",
+        "परतफेडीची": "paratfedechee",
+        "मुदत": "mudat",
+        "अपेक्षित": "apekshit",
+        "सांगाल": "saangaal",
+        "स्पष्ट": "spashta",
+        "समजले": "samajle",
+        "समजला": "samajlaa",
+        "क्षमस्व": "kshamaswa",
+        "माफी": "maafi",
+        "ऐकू": "aikoo",
+        "आले": "aale",
+        "पुन्हा": "punha",
+        "एकदा": "ekda",
+        "दोनदा": "donda",
+        "क्रमांक": "kramaank",
+        "अंकी": "ankee",
+        "अंक": "ank",
+        "अंकांचा": "ankaanchaa",
+        "अंकीय": "ankiya",
+        "आवश्यक": "aavashyak",
+        "आवश्यकता": "aavashyaktaa",
+        "विचार": "vichaar",
+        "इच्छिता": "ichhitaa",
+        "संबंधित": "sambandhit",
+        "ज्ञान": "gyaan",
+        "नोंदवून": "nondavoon",
+        "कोपायलट": "Copilot",
+        "वॉयस": "Voice",
+        "व्हॉइस": "Voice",
     }
 
     # Pre-process text to standardize punctuation pauses

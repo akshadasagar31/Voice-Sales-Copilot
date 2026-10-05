@@ -1,5 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
+import pytest
 from fastapi.testclient import TestClient
 import httpx
 import base64
@@ -101,34 +102,57 @@ def test_api_tts_routes_module2_marathi_to_sarvam(client):
         assert response.status_code == 200
         assert response.headers["content-type"] == "audio/wav"
         assert response.headers["x-tts-provider"] == "sarvam"
-        assert response.headers["x-tts-voice"] == "simran"
+        assert response.headers["x-tts-voice"] == "ritu"
         assert response.headers["x-tts-language"] == "mr-IN"
         assert response.content == mock_wav_bytes
         mock_sarvam.assert_called_once()
 
 
-def test_api_tts_module2_marathi_falls_back_to_deepgram_on_sarvam_error(client):
-    """Verify that if Sarvam TTS fails or runs out of credits for Module 2 Marathi, it automatically falls back to Deepgram."""
-    mock_mp3_bytes = b"ID3\x03\x00\x00\x00\x00\x00#TSSEfake_deepgram_marathi_mp3"
+def test_api_tts_routes_module2_hindi_to_sarvam(client):
+    mock_wav_bytes = b"RIFFfake_wav_data"
+    with patch.object(
+        SarvamTTSService,
+        "synthesize_speech",
+        return_value=mock_wav_bytes,
+    ) as mock_sarvam:
+        response = client.post(
+            "/api/tts",
+            json={
+                "text": "एचडीएफसी बैंक के पर्सनल लोन के लिए न्यूनतम सिबिल स्कोर 750 आवश्यक है।",
+                "language": "hi",
+                "module": "module2",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "audio/wav"
+        assert response.headers["x-tts-provider"] == "sarvam"
+        assert response.headers["x-tts-voice"] == "priya"
+        assert response.headers["x-tts-language"] == "hi-IN"
+        assert response.content == mock_wav_bytes
+        mock_sarvam.assert_called_once()
+
+
+def test_api_tts_module2_marathi_falls_back_to_browser_on_sarvam_error(client):
+    """Verify that if Sarvam TTS fails or runs out of credits for Module 2 Marathi, it falls back to native browser speech synthesis."""
     with patch.object(
         SarvamTTSService,
         "synthesize_speech",
         side_effect=SarvamTTSAPIError(402, "No credits available."),
     ):
-        with patch("services.tts.DeepgramTTSService.synthesize_speech", return_value=mock_mp3_bytes) as mock_dg:
-            response = client.post(
-                "/api/tts",
-                json={
-                    "text": "एचडीएफसी बँकेच्या वैयक्तिक कर्जासाठी किमान CIBIL score ७५० आवश्यक आहे.",
-                    "language": "mr",
-                    "module": "module2",
-                },
-            )
-            assert response.status_code == 200
-            assert response.headers["content-type"] == "audio/mpeg"
-            assert response.headers["x-tts-provider"] == "deepgram"
-            assert response.content == mock_mp3_bytes
-            mock_dg.assert_called_once()
+        response = client.post(
+            "/api/tts",
+            json={
+                "text": "एचडीएफसी बँकेच्या वैयक्तिक कर्जासाठी किमान CIBIL score ७५० आवश्यक आहे.",
+                "language": "mr",
+                "module": "module2",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["x-tts-fallback"] == "browser-speech-synthesis"
+        data = response.json()
+        assert data["fallback_to_browser"] is True
+        assert data["language"] == "mr-IN"
+        assert "एचडीएफसी" in data["text"]
 
 
 # ---------------------------------------------------------------------------
@@ -191,14 +215,69 @@ def test_api_tts_routes_module1_hindi_to_sarvam_priya(client):
         assert kwargs["speaker"] == "priya"
 
 
+@pytest.mark.parametrize(
+    ("language", "text", "expected_language", "expected_voice"),
+    [
+        ("hi-IN", "\u092e\u0941\u091d\u0947 \u092a\u0930\u094d\u0938\u0928\u0932 \u0932\u094b\u0928 \u091a\u093e\u0939\u093f\u090f\u0964", "hi-IN", "priya"),
+        ("mr-IN", "\u092e\u0932\u093e \u0935\u0948\u092f\u0915\u094d\u0924\u093f\u0915 \u0915\u0930\u094d\u091c \u0939\u0935\u0947 \u0906\u0939\u0947\u0964", "mr-IN", "ritu"),
+    ],
+)
+def test_api_tts_module1_normalizes_indic_language_variants(client, language, text, expected_language, expected_voice):
+    """Indic Module 1 requests always use the matching Sarvam voice and locale."""
+    mock_wav_bytes = b"RIFFindic_variant_wav"
+    with patch.object(SarvamTTSService, "synthesize_speech", return_value=mock_wav_bytes) as mock_sarvam, patch.object(
+        __import__("services.tts", fromlist=["DeepgramTTSService"]).DeepgramTTSService,
+        "synthesize_speech",
+    ) as mock_deepgram:
+        response = client.post("/api/tts", json={"text": text, "language": language, "module": "module1"})
+
+    assert response.status_code == 200
+    assert response.headers["x-tts-provider"] == "sarvam"
+    assert response.headers["x-tts-voice"] == expected_voice
+    assert response.headers["x-tts-language"] == expected_language
+    assert mock_sarvam.call_args.kwargs["language_code"] == expected_language
+    assert mock_sarvam.call_args.kwargs["speaker"] == expected_voice
+    mock_deepgram.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("language", "text", "expected_language", "expected_voice"),
+    [
+        ("hi-IN", "\u092e\u0941\u091d\u0947 \u0932\u094b\u0928 \u091a\u093e\u0939\u093f\u090f\u0964", "hi-IN", "priya"),
+        ("mr-IN", "\u092e\u0932\u093e \u0915\u0930\u094d\u091c \u0939\u0935\u0947 \u0906\u0939\u0947\u0964", "mr-IN", "ritu"),
+    ],
+)
+def test_api_tts_module1_indic_sarvam_failure_uses_browser_fallback(client, language, text, expected_language, expected_voice):
+    """Indic Module 1 content never falls through to English Deepgram TTS."""
+    with patch.object(SarvamTTSService, "synthesize_speech", side_effect=SarvamTTSAPIError(402, "quota")), patch.object(
+        __import__("services.tts", fromlist=["DeepgramTTSService"]).DeepgramTTSService,
+        "synthesize_speech",
+    ) as mock_deepgram:
+        response = client.post("/api/tts", json={"text": text, "language": language, "module": "module1"})
+
+    assert response.status_code == 200
+    assert response.headers["x-tts-fallback"] == "browser-speech-synthesis"
+    body = response.json()
+    assert body["language"] == expected_language
+    assert body["speaker"] == expected_voice
+    mock_deepgram.assert_not_called()
+
+
 def test_api_tts_routes_module1_english_to_sarvam_simran(client):
-    """Verify that Module 1 English requests route to Sarvam Bulbul v3 en-IN with simran."""
+    """Verify that Module 1 English requests route to Sarvam Bulbul v3 en-IN with simran when Sarvam is active."""
     mock_wav_bytes = b"RIFFfake_module1_english_wav"
-    with patch.object(
+    with patch(
+        "main.get_model_manager"
+    ) as mock_mgr, patch.object(
         SarvamTTSService,
         "synthesize_speech",
         return_value=mock_wav_bytes,
     ) as mock_sarvam:
+        mock_mgr.return_value.get_active_model.return_value = {
+            "provider": "Sarvam AI",
+            "model_id": "bulbul:v3",
+            "is_active": True,
+        }
         response = client.post(
             "/api/tts",
             json={
@@ -216,4 +295,3 @@ def test_api_tts_routes_module1_english_to_sarvam_simran(client):
         args, kwargs = mock_sarvam.call_args
         assert kwargs["language_code"] == "en-IN"
         assert kwargs["speaker"] == "simran"
-

@@ -24,7 +24,6 @@ from typing import Dict, Any, Optional, Union
 import httpx
 from services.language import (
     detect_language,
-    devanagari_to_phonetic,
     count_devanagari_chars,
     LANG_EN,
     LANG_HI,
@@ -68,6 +67,20 @@ LANGUAGE_TTS_MODELS = {
     LANG_HI: os.getenv("DEEPGRAM_TTS_MODEL_HI", "aura-luna-en"),
     LANG_MR: os.getenv("DEEPGRAM_TTS_MODEL_MR", "aura-stella-en"),
 }
+
+_MAX_AUDIO_CACHE_ENTRIES = 256
+_audio_response_cache: Dict[str, bytes] = {}
+
+def get_cached_tts_audio(cache_key: str) -> Optional[bytes]:
+    """Retrieve pre-synthesized audio bytes from memory in < 1ms."""
+    return _audio_response_cache.get(cache_key)
+
+def set_cached_tts_audio(cache_key: str, audio_bytes: bytes) -> None:
+    """Store synthesized audio bytes into memory with LRU eviction."""
+    if len(_audio_response_cache) >= _MAX_AUDIO_CACHE_ENTRIES:
+        first_key = next(iter(_audio_response_cache))
+        _audio_response_cache.pop(first_key, None)
+    _audio_response_cache[cache_key] = audio_bytes
 
 
 
@@ -180,17 +193,14 @@ class DeepgramTTSService:
         else:
             voice_model = DEFAULT_TTS_MODEL
 
-        # For Hindi and Marathi Devanagari text in Deepgram fallback, transliterate to clear phonetic Latin script
-        # so Deepgram's text-to-speech engine pronounces every word accurately and naturally!
-        has_devanagari = count_devanagari_chars(clean_text) >= 2 or target_lang in (LANG_HI, LANG_MR)
+        # Deepgram Aura TTS only supports English. Never fall back to Romanized Hindi/Marathi or English phonetic speech!
+        has_devanagari = count_devanagari_chars(clean_text) >= 1 or target_lang in (LANG_HI, LANG_MR)
         if has_devanagari:
-            spoken_text = devanagari_to_phonetic(clean_text)
-            logger.info(
-                f"Deepgram TTS converted Devanagari ({target_lang}) to phonetic text: "
-                f"'{spoken_text[:100]}...' (original length: {len(clean_text)})"
+            raise DeepgramTTSError(
+                f"Deepgram Aura TTS does not support {target_lang} Devanagari speech. "
+                "Hindi and Marathi require Sarvam Bulbul or native browser speechSynthesis."
             )
-        else:
-            spoken_text = clean_text
+        spoken_text = clean_text
 
         url = f"{DEEPGRAM_SPEAK_URL}?model={voice_model}"
 

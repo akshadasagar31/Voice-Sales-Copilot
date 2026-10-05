@@ -71,13 +71,19 @@ export async function POST(req: NextRequest) {
     const audioBuffer = await backendRes.arrayBuffer();
     const contentType = backendRes.headers.get("content-type") || "audio/mpeg";
     const ext = contentType.includes("wav") ? "wav" : "mp3";
+    const fallbackHdr = backendRes.headers.get("x-tts-fallback");
+
+    const responseHeaders: Record<string, string> = {
+      "Content-Type": contentType,
+      "Content-Disposition": `inline; filename=tts_response.${ext}`,
+    };
+    if (fallbackHdr) {
+      responseHeaders["X-TTS-Fallback"] = fallbackHdr;
+    }
 
     return new NextResponse(audioBuffer, {
       status: 200,
-      headers: {
-        "Content-Type": contentType,
-        "Content-Disposition": `inline; filename=tts_response.${ext}`,
-      },
+      headers: responseHeaders,
     });
   } catch (error: any) {
     console.error("Error proxying request to FastAPI /api/tts:", error);

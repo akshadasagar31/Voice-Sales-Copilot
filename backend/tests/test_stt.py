@@ -157,7 +157,7 @@ async def test_deepgram_service_transcribe_parses_response_correctly(sample_audi
         mock_client_cls.return_value.__aenter__.return_value = mock_client_instance
 
         service = DeepgramSTTService(api_key="test-key-123")
-        res = await service.transcribe_audio(sample_audio_bytes, content_type="audio/webm")
+        res = await service.transcribe_audio(sample_audio_bytes, content_type="audio/webm", language="en")
 
     assert res["success"] is True
     assert res["transcript"] == "Follow up scheduled for Thursday at 2 PM."
@@ -202,7 +202,7 @@ async def test_deepgram_service_retries_transient_503_and_succeeds(sample_audio_
         mock_client_cls.return_value.__aenter__.return_value = mock_client_instance
 
         service = DeepgramSTTService(api_key="secret-key-xyz")
-        res = await service.transcribe_audio(sample_audio_bytes)
+        res = await service.transcribe_audio(sample_audio_bytes, language="en")
 
     assert res["success"] is True
     assert res["transcript"] == "Hello, recovery succeeded."
@@ -230,7 +230,7 @@ async def test_deepgram_service_exhausts_retries_on_persistent_503(sample_audio_
 
         service = DeepgramSTTService(api_key="secret-key-xyz")
         with pytest.raises(DeepgramAPIError) as exc_info:
-            await service.transcribe_audio(sample_audio_bytes)
+            await service.transcribe_audio(sample_audio_bytes, language="en")
 
     assert exc_info.value.status_code == 503
     assert "Service Unavailable" in exc_info.value.message
@@ -244,7 +244,7 @@ def test_extract_safe_response_detail_never_leaks_api_key():
     from services.stt import _extract_safe_response_detail
 
     mock_resp = MagicMock()
-    secret_key = "660af0f04c838e51539fc1614dc911d56ced14ae"
+    secret_key = "mock_secret_api_key_redaction_test_12345"
     mock_resp.json.return_value = {"err_msg": f"Auth token {secret_key} rejected by server"}
     mock_resp.text = f"Auth token {secret_key} rejected by server"
 
@@ -290,7 +290,7 @@ def test_ws_voice_stt_requires_api_key(client):
 def test_financial_keyterms_contain_marathi_specific_terms():
     """Verify that domain-specific Marathi financial keyterms are registered."""
     from services.stt import FINANCIAL_KEYTERMS
-    assert "CIBIL स्कोर" in FINANCIAL_KEYTERMS
+    assert "सिबिल स्कोर" in FINANCIAL_KEYTERMS
     assert "मासिक EMI" in FINANCIAL_KEYTERMS
     assert "दरमहा EMI" in FINANCIAL_KEYTERMS
     assert "HDFC बँक" in FINANCIAL_KEYTERMS
@@ -302,13 +302,13 @@ def test_financial_keyterms_contain_marathi_specific_terms():
 
 
 def test_build_deepgram_ws_url_marathi_and_multi():
-    """Verify build_deepgram_ws_url correctly passes language=mr and language=multi for auto."""
+    """Verify build_deepgram_ws_url correctly passes language=mr and language=en-IN for auto."""
     from services.stt import build_deepgram_ws_url
     url_mr = build_deepgram_ws_url(model="nova-3", language="mr")
     assert "language=mr" in url_mr
 
     url_auto = build_deepgram_ws_url(model="nova-3", language=None)
-    assert "language=multi" in url_auto
+    assert "language=en-IN" in url_auto
 
 
 def test_normalize_stt_transcript_marathi_and_multilingual():
@@ -321,4 +321,94 @@ def test_normalize_stt_transcript_marathi_and_multilingual():
     assert normalize_stt_transcript("This has slang like gonna and wanna and typo xyz123 .") == "This has slang like gonna and wanna and typo xyz123."
     assert normalize_stt_transcript("") == ""
     assert normalize_stt_transcript(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_connect_deepgram_ws_retries_transient_503():
+    """Verify connect_deepgram_ws_with_retry retries on transient 503 and succeeds."""
+    import websockets.exceptions
+    from services.stt import connect_deepgram_ws_with_retry
+
+    mock_ws = MagicMock()
+    mock_ws.state.name = "OPEN"
+
+    try:
+        exc_503 = websockets.exceptions.InvalidStatusCode(503, {})
+    except TypeError:
+        exc_503 = websockets.exceptions.InvalidStatusCode(503)
+    exc_503.status_code = 503
+
+    with patch("websockets.connect", new_callable=AsyncMock) as mock_connect, \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        mock_connect.side_effect = [exc_503, mock_ws]
+
+        ws = await connect_deepgram_ws_with_retry("wss://api.deepgram.com/test", {"Authorization": "Token secret"})
+        assert ws == mock_ws
+        assert mock_connect.call_count == 2
+        assert mock_sleep.called
+
+
+@pytest.mark.asyncio
+async def test_connect_deepgram_ws_retries_getaddrinfo_failed():
+    """Verify connect_deepgram_ws_with_retry retries on transient socket.gaierror getaddrinfo failed."""
+    import socket
+    from services.stt import connect_deepgram_ws_with_retry
+
+    mock_ws = MagicMock()
+    mock_ws.state.name = "OPEN"
+
+    dns_exc = socket.gaierror(11001, "getaddrinfo failed")
+
+    with patch("websockets.connect", new_callable=AsyncMock) as mock_connect, \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        mock_connect.side_effect = [dns_exc, mock_ws]
+
+        ws = await connect_deepgram_ws_with_retry("wss://api.deepgram.com/test", {"Authorization": "Token secret"})
+        assert ws == mock_ws
+        assert mock_connect.call_count == 2
+        assert mock_sleep.called
+
+
+@pytest.mark.asyncio
+async def test_deepgram_ws_pool_reuses_healthy_and_recreates_stale():
+    """Verify DeepgramWSConnectionPool reuses open connections and discards stale/closed ones."""
+    from services.stt import DeepgramWSConnectionPool
+
+    pool = DeepgramWSConnectionPool()
+    url = "wss://api.deepgram.com/listen?model=nova-3"
+    headers = {"Authorization": "Token key"}
+
+    mock_ws_1 = MagicMock()
+    mock_ws_1.state.name = "OPEN"
+    mock_ws_1.close = AsyncMock()
+
+    mock_ws_2 = MagicMock()
+    mock_ws_2.state.name = "OPEN"
+    mock_ws_2.close = AsyncMock()
+
+    with patch("services.stt.connect_deepgram_ws_with_retry", new_callable=AsyncMock) as mock_conn:
+        mock_conn.side_effect = [mock_ws_1, mock_ws_2]
+
+        # 1. Acquire initial connection
+        ws1 = await pool.acquire(url, headers)
+        assert ws1 == mock_ws_1
+        assert mock_conn.call_count == 1
+
+        # 2. Release back to pool as healthy
+        await pool.release(url, ws1, broken=False)
+
+        # 3. Acquire again -> must REUSE healthy connection without calling connect
+        ws_reused = await pool.acquire(url, headers)
+        assert ws_reused == mock_ws_1
+        assert mock_conn.call_count == 1  # No new connect!
+
+        # 4. Release it as broken / closed
+        mock_ws_1.state.name = "CLOSED"
+        await pool.release(url, ws_reused, broken=True)
+
+        # 5. Acquire again -> must discard stale and recreate via connect
+        ws_fresh = await pool.acquire(url, headers)
+        assert ws_fresh == mock_ws_2
+        assert mock_conn.call_count == 2  # Recreated!
+
 

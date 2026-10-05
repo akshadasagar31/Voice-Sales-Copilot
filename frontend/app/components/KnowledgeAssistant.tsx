@@ -46,8 +46,25 @@ import {
   Radio,
   X,
   PhoneOff,
+  Globe,
 } from "lucide-react";
 import { SentenceTokenizer, SentenceAudioQueue } from "@/lib/sentenceStreamingTTS";
+
+// Helper to determine accurate UI language indicator for messages
+function getMessageLanguage(text: string, fallbackLang?: string): string {
+  const hasDevanagari = /[\u0900-\u097F]/.test(text);
+  if (!hasDevanagari) return "EN";
+  if (/[ळऱ]/.test(text) || /\b(आहे|आहेत|नाही|नाहीत|पाहिजे|हवे|हवं|नमस्कार|किती|द्या|सांगा|होय|आणि)\b/.test(text)) {
+    return "MR";
+  }
+  if (/\b(है|हैं|नहीं|चाहिए|मुझे|नमस्ते|हाँ|बताएं|कितना|और|क्या)\b/.test(text)) {
+    return "HI";
+  }
+  if (fallbackLang && ["mr", "hi", "en"].includes(fallbackLang.toLowerCase())) {
+    return fallbackLang.toUpperCase();
+  }
+  return "HI";
+}
 
 
 interface ContextChunk {
@@ -155,7 +172,11 @@ const SUGGESTED_PROMPTS: PromptItem[] = [
   { text: "कंपनीचे एंटरप्राइज सवलत दर आणि करार कालावधी पर्याय काय आहेत?", lang: "MR", label: "मराठी" },
 ];
 
-export default function KnowledgeAssistant() {
+interface KnowledgeAssistantProps {
+  userInitials?: string;
+}
+
+export default function KnowledgeAssistant({ userInitials = "AS" }: KnowledgeAssistantProps) {
   const [question, setQuestion] = useState("");
   const [topK, setTopK] = useState(4);
   const [namespace, setNamespace] = useState("sales_playbooks");
@@ -167,6 +188,19 @@ export default function KnowledgeAssistant() {
   const [messages, setMessages] = useState<QAMessage[]>([]);
   const [selectedLanguage, setSelectedLanguage] = useState<string>("auto");
   const [detectedLanguage, setDetectedLanguage] = useState<string>("en");
+  const [isLanguageMenuOpen, setIsLanguageMenuOpen] = useState(false);
+  const languageMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close language dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (languageMenuRef.current && !languageMenuRef.current.contains(event.target as Node)) {
+        setIsLanguageMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   // Continuous Hands-Free ChatGPT-Style Voice Interaction States
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
@@ -178,6 +212,12 @@ export default function KnowledgeAssistant() {
   const [liveTranscript, setLiveTranscript] = useState<string | null>(null);
   const [activePlayingMsgId, setActivePlayingMsgId] = useState<string | null>(null);
   const [ttsAudioUrl, setTtsAudioUrl] = useState<string | null>(null);
+
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, voiceState, isLoading]);
 
   // Audio capture & Web Audio API refs
   const audioStreamRef = useRef<MediaStream | null>(null);
@@ -547,9 +587,9 @@ export default function KnowledgeAssistant() {
 
       if (audio) {
         if (!sentenceAudioQueueRef.current) {
-          sentenceAudioQueueRef.current = new SentenceAudioQueue(audio, {}, audioContextRef.current, { module: "module2", speaker: "simran" });
+          sentenceAudioQueueRef.current = new SentenceAudioQueue(audio, {}, audioContextRef.current, { module: "module2" });
         } else {
-          sentenceAudioQueueRef.current.setOptions({ module: "module2", speaker: "simran" });
+          sentenceAudioQueueRef.current.setOptions({ module: "module2" });
           if (audioContextRef.current) {
             sentenceAudioQueueRef.current.setAudioContext(audioContextRef.current);
           }
@@ -586,18 +626,37 @@ export default function KnowledgeAssistant() {
       if (isTurnStale()) return;
 
       const requestedLang = selectedLanguage !== "auto" ? selectedLanguage : (langHint || undefined);
-      const ragRes = await fetch("/api/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: abortController.signal,
-        body: JSON.stringify({
-          question: transcribedQuery,
-          top_k: topK,
-          namespace: namespace.trim() || "sales_playbooks",
-          language: requestedLang,
-          stream: true,
-        }),
-      });
+      const fastApiBase = process.env.NEXT_PUBLIC_FASTAPI_URL || "http://127.0.0.1:8001";
+      const targetUrl = `${fastApiBase.replace(/\/+$/, "")}/api/ask`;
+      let ragRes: Response;
+      try {
+        ragRes = await fetch(targetUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: abortController.signal,
+          body: JSON.stringify({
+            question: transcribedQuery,
+            top_k: Math.min(topK || 4, 4),
+            namespace: namespace.trim() || "sales_playbooks",
+            language: requestedLang,
+            stream: true,
+          }),
+        });
+      } catch (directErr) {
+        if (abortController.signal.aborted) throw directErr;
+        ragRes = await fetch("/api/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: abortController.signal,
+          body: JSON.stringify({
+            question: transcribedQuery,
+            top_k: Math.min(topK || 4, 4),
+            namespace: namespace.trim() || "sales_playbooks",
+            language: requestedLang,
+            stream: true,
+          }),
+        });
+      }
 
       if (isTurnStale()) return;
 
@@ -645,7 +704,7 @@ export default function KnowledgeAssistant() {
                 is_greeting: parsed.is_greeting ?? false,
                 timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
               };
-              setMessages((prev) => [newMessage, ...prev]);
+              setMessages((prev) => [...prev, newMessage]);
             }
           } else if (event === "token") {
             const token = parsed.token ?? parsed.delta ?? "";
@@ -667,7 +726,7 @@ export default function KnowledgeAssistant() {
                   is_greeting: false,
                   timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
                 };
-                setMessages((prev) => [newMessage, ...prev]);
+                setMessages((prev) => [...prev, newMessage]);
               }
 
               // Feed incoming token into SentenceTokenizer
@@ -786,7 +845,7 @@ export default function KnowledgeAssistant() {
           language: resolvedLang,
           timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
         };
-        setMessages((prev) => [finalMessage, ...prev]);
+        setMessages((prev) => [...prev, finalMessage]);
       }
 
       const trailingSentence = tokenizer.flush();
@@ -859,9 +918,7 @@ export default function KnowledgeAssistant() {
       } else {
         formData.append("file", blob, filename);
       }
-      if (selectedLanguage !== "auto") {
-        formData.append("language", selectedLanguage);
-      }
+      formData.append("language", selectedLanguage);
       formData.append("module", "module2");
 
       let sttRes: Response | null = null;
@@ -936,6 +993,10 @@ export default function KnowledgeAssistant() {
         return;
       }
 
+      if (sttData.detected_language) {
+        const dLang = sttData.detected_language.split("-")[0].toLowerCase();
+        setDetectedLanguage(dLang);
+      }
       await executeRagTurn(transcribedQuery, sttData.detected_language, turnId, abortController);
     } catch (err: any) {
       if (isTurnStale()) return;
@@ -995,7 +1056,7 @@ export default function KnowledgeAssistant() {
     ).replace(/^http/, "ws");
 
     const sampleRate = audioContextRef.current?.sampleRate || 48000;
-    const langParam = selectedLanguage !== "auto" ? `&language=${selectedLanguage}` : "";
+    const langParam = selectedLanguage !== "auto" ? `&language=${selectedLanguage}` : "&language=auto";
     const wsUrl = `${baseWs}/ws/voice-stt?sample_rate=${sampleRate}${langParam}&module=module2`;
 
     try {
@@ -1050,6 +1111,10 @@ export default function KnowledgeAssistant() {
               setVoiceState("processing");
               voiceStateRef.current = "processing";
 
+              if (data.detected_language) {
+                const dLang = data.detected_language.split("-")[0].toLowerCase();
+                setDetectedLanguage(dLang);
+              }
               executeRagTurn(verbatimText, data.detected_language, turnId, turnAbortController);
             } else if (!verbatimText && !hasWsFinalizedRef.current) {
               hasWsFinalizedRef.current = true;
@@ -1171,7 +1236,7 @@ export default function KnowledgeAssistant() {
     const ws = sttSocketRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       try {
-        ws.send(JSON.stringify({ type: "CloseStream" }));
+        ws.send(JSON.stringify({ type: "Finalize" }));
       } catch (_) { }
 
       // Safety fallback: if WS doesn't emit final within 1200ms, seamlessly fallback to batch HTTP STT
@@ -1638,9 +1703,9 @@ export default function KnowledgeAssistant() {
 
       if (audio) {
         if (!sentenceAudioQueueRef.current) {
-          sentenceAudioQueueRef.current = new SentenceAudioQueue(audio, {}, audioContextRef.current, { module: "module2", speaker: "simran" });
+          sentenceAudioQueueRef.current = new SentenceAudioQueue(audio, {}, audioContextRef.current, { module: "module2" });
         } else {
-          sentenceAudioQueueRef.current.setOptions({ module: "module2", speaker: "simran" });
+          sentenceAudioQueueRef.current.setOptions({ module: "module2" });
           if (audioContextRef.current) {
             sentenceAudioQueueRef.current.setAudioContext(audioContextRef.current);
           }
@@ -1677,7 +1742,7 @@ export default function KnowledgeAssistant() {
 
         sentenceAudioQueueRef.current.startNewTurn(currentRequestId);
 
-        const targetLang = lang || (selectedLanguage !== "auto" ? selectedLanguage : "en");
+        const targetLang = lang || (selectedLanguage !== "auto" ? selectedLanguage : getMessageLanguage(text, "en").toLowerCase());
         const cleanText = cleanTextForSpeech(text);
         const tokenizer = new SentenceTokenizer();
         const sentences = tokenizer.feed(cleanText);
@@ -1769,7 +1834,7 @@ export default function KnowledgeAssistant() {
   };
 
   return (
-    <div className="space-y-6 w-full">
+    <div className="flex flex-col flex-1 w-full max-w-5xl mx-auto min-h-[calc(100vh-10rem)] justify-between">
       {/* Single persistent audio element for Deepgram TTS playback */}
       <audio
         ref={ttsAudioRef}
@@ -1778,634 +1843,252 @@ export default function KnowledgeAssistant() {
         style={{ display: "none" }}
       />
 
-      {/* Header Banner — CallNow Hero Style */}
-      <div className="hero">
-        <div className="flex flex-col md:flex-row md:items-start justify-between gap-4">
-          <div className="flex-1">
-            <div className="flex items-center gap-2.5 mb-2">
-              <span className="hero-badge">
-                <Sparkles className="h-3 w-3" />
-                RAG Grounded Intelligence
-              </span>
+      {/* Top Header Bar matching Module 1 styling */}
+      <div className="px-4 sm:px-6 py-3.5 mb-3 flex items-center justify-between border-b border-slate-100 bg-white rounded-2xl shadow-2xs shrink-0">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-xl bg-teal-50 text-[#00897b] flex items-center justify-center border border-teal-100/60">
+            <Sparkles className="w-4 h-4 text-[#00897b]" />
+          </div>
+          <span className="font-bold text-slate-900 text-sm sm:text-base">
+            Knowledge Assistant
+          </span>
+          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 uppercase">
+            {selectedLanguage === "auto"
+              ? (detectedLanguage ? detectedLanguage.toUpperCase() : "EN")
+              : selectedLanguage.toUpperCase()}
+          </span>
+        </div>
+
+        {/* Conversation Language Selector Dropdown */}
+        <div className="relative" ref={languageMenuRef}>
+          <button
+            onClick={() => setIsLanguageMenuOpen(!isLanguageMenuOpen)}
+            className="rounded-full border border-slate-200/90 px-3.5 py-1 bg-white hover:bg-slate-50 flex items-center gap-1.5 text-xs font-semibold text-slate-700 cursor-pointer shadow-2xs transition-colors"
+            title="Select Language"
+          >
+            <Globe className="w-3.5 h-3.5 text-slate-400" />
+            <span>
+              {selectedLanguage === "auto"
+                ? (detectedLanguage ? detectedLanguage.toUpperCase() : "EN")
+                : selectedLanguage.toUpperCase()}
+            </span>
+            <ChevronDown className="w-3 h-3 text-slate-400" />
+          </button>
+
+          {isLanguageMenuOpen && (
+            <div className="absolute right-0 top-full mt-1.5 w-36 rounded-xl bg-white border border-slate-100 shadow-lg py-1 z-30 text-xs">
+              <button
+                onClick={() => {
+                  setSelectedLanguage("en");
+                  setIsLanguageMenuOpen(false);
+                }}
+                className={`w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center justify-between cursor-pointer ${
+                  selectedLanguage === "en"
+                    ? "font-bold text-teal-700 bg-teal-50/50"
+                    : "text-slate-700"
+                }`}
+              >
+                <span>English (EN)</span>
+                {selectedLanguage === "en" && (
+                  <Check className="w-3 h-3 text-teal-600" />
+                )}
+              </button>
+              <button
+                onClick={() => {
+                  setSelectedLanguage("hi");
+                  setIsLanguageMenuOpen(false);
+                }}
+                className={`w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center justify-between cursor-pointer ${
+                  selectedLanguage === "hi"
+                    ? "font-bold text-teal-700 bg-teal-50/50"
+                    : "text-slate-700"
+                }`}
+              >
+                <span>Hindi (HI)</span>
+                {selectedLanguage === "hi" && (
+                  <Check className="w-3 h-3 text-teal-600" />
+                )}
+              </button>
+              <button
+                onClick={() => {
+                  setSelectedLanguage("mr");
+                  setIsLanguageMenuOpen(false);
+                }}
+                className={`w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center justify-between cursor-pointer ${
+                  selectedLanguage === "mr"
+                    ? "font-bold text-teal-700 bg-teal-50/50"
+                    : "text-slate-700"
+                }`}
+              >
+                <span>Marathi (MR)</span>
+                {selectedLanguage === "mr" && (
+                  <Check className="w-3 h-3 text-teal-600" />
+                )}
+              </button>
+              <button
+                onClick={() => {
+                  setSelectedLanguage("auto");
+                  setIsLanguageMenuOpen(false);
+                }}
+                className={`w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center justify-between cursor-pointer border-t border-slate-100 ${
+                  selectedLanguage === "auto"
+                    ? "font-bold text-teal-700 bg-teal-50/50"
+                    : "text-slate-700"
+                }`}
+              >
+                <span>Auto (Detect)</span>
+                {selectedLanguage === "auto" && (
+                  <Check className="w-3 h-3 text-teal-600" />
+                )}
+              </button>
             </div>
-            <h1 className="hero-title">
+          )}
+        </div>
+      </div>
+
+      {/* Main Conversation Area */}
+      <div className="flex-1 w-full overflow-y-auto px-2 sm:px-4 py-4 flex flex-col">
+        {/* Error Alert */}
+        {error && (
+          <div className="max-w-2xl mx-auto w-full p-3.5 mb-4 rounded-2xl bg-rose-50 border border-rose-200/80 text-rose-700 text-xs flex items-center justify-between gap-3 shadow-xs">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
+              <span>{error}</span>
+            </div>
+            <button
+              onClick={() => handleAsk()}
+              className="px-2.5 py-1 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-800 text-[11px] font-semibold transition cursor-pointer"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* Empty State Welcome Section */}
+        {messages.length === 0 && !isLoading && voiceState === "idle" && (
+          <div className="flex-1 flex flex-col items-center justify-center text-center px-4 py-16 my-auto select-none animate-in fade-in duration-300">
+            <h1 className="text-3xl sm:text-4xl font-bold tracking-tight text-slate-900 mb-2">
               Ask Assistant
             </h1>
-            <p className="hero-subtitle mt-1 text-xs sm:text-sm text-[var(--ink-soft)] leading-relaxed max-w-3xl">
-              Ask questions about your uploaded sales playbooks, loan policies, and knowledge documents. Get fast, source-grounded answers in English, Hindi, or Marathi.
-            </p>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 self-start shrink-0">
-            {/* Multilingual Selector & Auto-Detection Status */}
-            <div className="flex items-center gap-1 p-1 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)] text-xs">
-              <span className="text-[10px] text-[var(--ink-muted)] px-1 font-semibold">
-                🌐
-              </span>
-              <button
-                type="button"
-                onClick={() => setSelectedLanguage("auto")}
-                className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-all cursor-pointer ${selectedLanguage === "auto"
-                    ? "bg-[var(--accent)] text-white shadow-sm"
-                    : "text-[var(--ink-muted)] hover:text-white"
-                  }`}
-                title={`Auto Language Detection (Active: ${detectedLanguage.toUpperCase()})`}
-              >
-                Auto ({detectedLanguage.toUpperCase()})
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedLanguage("en")}
-                className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${selectedLanguage === "en"
-                    ? "bg-[var(--accent)] text-white shadow-sm"
-                    : "text-[var(--ink-muted)] hover:text-white"
-                  }`}
-              >
-                EN
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedLanguage("hi")}
-                className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${selectedLanguage === "hi"
-                    ? "bg-[var(--accent)] text-white shadow-sm"
-                    : "text-[var(--ink-muted)] hover:text-white"
-                  }`}
-              >
-                हिंदी
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedLanguage("mr")}
-                className={`px-2 py-0.5 rounded text-[10px] font-medium transition-all cursor-pointer ${selectedLanguage === "mr"
-                    ? "bg-[var(--accent)] text-white shadow-sm"
-                    : "text-[var(--ink-muted)] hover:text-white"
-                  }`}
-              >
-                मराठी
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-
-
-      {/* CONTINUOUS GEMINI-STYLE VOICE HUD (Active while in continuous mode or when voiceState !== idle) */}
-      {(isContinuousMode || voiceState !== "idle") && (
-        <div className="card overflow-hidden border-2 border-blue-500/40 bg-gradient-to-r from-blue-950/50 via-indigo-950/30 to-[var(--surface)] shadow-2xl shadow-blue-500/15">
-          <div className="p-4 sm:p-5">
-            {/* HUD Top Bar with Session Status and Exit Button */}
-            <div className="flex items-center justify-between gap-3 mb-3 pb-3 border-b border-blue-500/20">
-              <div className="flex items-center gap-2">
-                <span className="relative flex h-2.5 w-2.5">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
-                </span>
-                <span className="text-xs font-bold text-white tracking-wide flex items-center gap-1.5">
-                  Gemini Live Voice Mode
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                    Ongoing Conversation
-                  </span>
-                </span>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {isSilenceCountdown && (
-                  <span className="status-pill status-pill-warning text-[10px] animate-pulse">
-                    Silence detected · Submitting in 0.9s...
-                  </span>
-                )}
-
-                {/* The ONLY button that terminates Voice Mode */}
-                <button
-                  onClick={exitContinuousVoiceMode}
-                  className="btn btn-danger btn-sm text-xs gap-1.5 cursor-pointer shadow-md shadow-red-500/20"
-                  title="Exit Continuous Voice Mode"
-                >
-                  <PhoneOff className="h-3.5 w-3.5" />
-                  <span>Exit Voice Mode</span>
-                </button>
-              </div>
-            </div>
-
-            {/* LARGE ANIMATED BLUE/PURPLE GLOWING ORB (NO MIC ICON) */}
-            <div className="py-6 sm:py-8 flex flex-col items-center justify-center relative select-none">
-              {/* Outer Radiant Glow Rings & Ambient Halos */}
-              <div className="relative flex items-center justify-center my-2">
-                {/* Expanding Pulsing Glow Ring 1 */}
-                <div className="absolute w-48 h-48 sm:w-60 sm:h-60 md:w-72 md:h-72 rounded-full bg-gradient-to-tr from-blue-600/30 via-indigo-600/25 to-purple-600/30 blur-2xl animate-orb-ring-1 pointer-events-none" />
-
-                {/* Expanding Pulsing Glow Ring 2 */}
-                <div className="absolute w-56 h-56 sm:w-68 sm:h-68 md:w-80 md:h-80 rounded-full bg-gradient-to-tr from-purple-600/20 via-blue-500/20 to-cyan-400/20 blur-3xl animate-orb-ring-2 pointer-events-none" />
-
-                {/* THE LARGE ANIMATED GLOWING ORB */}
-                <div
-                  onClick={handleVoiceButtonClick}
-                  className={`relative w-40 h-40 sm:w-48 sm:h-48 md:w-56 md:h-56 rounded-full flex items-center justify-center cursor-pointer transition-all duration-300 animate-orb-breathe ${voiceState === "speaking"
-                      ? "ring-4 ring-cyan-400/50 shadow-[0_0_90px_rgba(56,189,248,0.7)]"
-                      : voiceState === "processing"
-                        ? "ring-4 ring-indigo-500/50 shadow-[0_0_80px_rgba(99,102,241,0.7)]"
-                        : "ring-2 ring-blue-400/40 shadow-[0_0_70px_rgba(99,102,241,0.6)]"
-                    }`}
-                  style={{
-                    transform:
-                      voiceState === "listening"
-                        ? `scale(${1 + Math.max(0, (Math.max(...audioLevels) - 14) / 240)})`
-                        : undefined,
-                  }}
-                  title={
-                    voiceState === "speaking"
-                      ? "Assistant is speaking — Speak anytime to interrupt"
-                      : voiceState === "listening"
-                        ? "Listening to your voice..."
-                        : "Processing question..."
-                  }
-                >
-                  {/* Rich Gradient Base Sphere with Inner Shadows */}
-                  <div className="absolute inset-0 rounded-full bg-gradient-to-tr from-blue-700 via-indigo-600 to-purple-600 shadow-[0_0_70px_rgba(99,102,241,0.8),inset_0_0_45px_rgba(168,85,247,0.6)] overflow-hidden">
-                    {/* Swirling Dynamic Mesh Layer */}
-                    <div className="absolute -inset-2 rounded-full bg-gradient-to-br from-cyan-400 via-blue-500 to-purple-700 opacity-80 blur-[2px] animate-orb-spin-slow mix-blend-screen" />
-
-                    {/* Fluid Radial Depth Wave */}
-                    <div className="absolute inset-0 rounded-full bg-radial from-transparent via-purple-500/35 to-blue-950/70 mix-blend-overlay" />
-
-                    {/* Specular Curved Highlights */}
-                    <div className="absolute top-3 left-7 w-24 h-12 rounded-full bg-gradient-to-b from-white/40 to-transparent blur-[3px] -rotate-35" />
-                    <div className="absolute bottom-4 right-7 w-20 h-10 rounded-full bg-gradient-to-t from-cyan-300/35 to-transparent blur-[2px] rotate-20" />
-                  </div>
-
-                  {/* Glowing Core (NO MIC ICON) */}
-                  <div className="relative z-10 w-20 h-20 sm:w-24 sm:h-24 rounded-full bg-gradient-to-tr from-blue-100/75 via-indigo-100/60 to-purple-100/75 blur-sm flex items-center justify-center">
-                    <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-full bg-white/85 blur-[2px]" />
-                  </div>
-                </div>
-              </div>
-
-              {/* Status Header below the Orb */}
-              <div className="mt-3 text-center space-y-1">
-                <div className="flex items-center justify-center gap-2">
-                  <span className="font-semibold text-sm sm:text-base text-white">
-                    {voiceState === "listening" && "Listening to your voice..."}
-                    {voiceState === "processing" && "Thinking & generating answer..."}
-                    {voiceState === "speaking" && "Assistant is speaking..."}
-                  </span>
-                  {voiceState === "listening" && (
-                    <span className="font-mono text-xs text-[var(--ink-muted)] bg-[var(--surface-2)] px-2 py-0.5 rounded border border-[var(--border)]">
-                      {formatTime(listeningSeconds)}
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-[var(--ink-soft)] max-w-md mx-auto">
-                  {voiceState === "listening" && "Speak naturally · Pausing briefly submits your question automatically"}
-                  {voiceState === "processing" && "Transcribing with Deepgram STT and retrieving grounded knowledge"}
-                  {voiceState === "speaking" && "Continuous mode active · Speak at any time to automatically interrupt"}
-                </p>
-              </div>
-            </div>
-
-            {/* 1. LISTENING STATE CONTROLS & BARS */}
-            {voiceState === "listening" && (
-              <div className="space-y-3 pt-2 border-t border-blue-500/20">
-                {/* Real-time Frequency Waveform Bars */}
-                <div className="h-10 flex items-end justify-center gap-1.5 sm:gap-2 px-2 py-1.5 bg-[var(--surface-2)]/80 rounded-[var(--radius)] border border-blue-500/20">
-                  {audioLevels.map((lvl, idx) => (
-                    <div
-                      key={idx}
-                      className="w-1.5 sm:w-2 bg-gradient-to-t from-blue-500 via-indigo-400 to-cyan-300 rounded-full transition-all duration-75"
-                      style={{
-                        height: `${Math.max(6, Math.round((lvl / 100) * 34))}px`,
-                      }}
-                    />
-                  ))}
-                </div>
-
-                {liveTranscript && (
-                  <div className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-blue-500/30 text-xs text-[var(--ink)]">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-400 block mb-0.5">
-                      Hearing you live (Deepgram Nova-3):
-                    </span>
-                    &ldquo;{liveTranscript}&rdquo;
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 2. PROCESSING STATE */}
-            {voiceState === "processing" && (
-              <div className="space-y-3 pt-2 border-t border-blue-500/20">
-                {/* Multi-step progress pipeline badge */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
-                  <div
-                    className={`p-2.5 rounded-[var(--radius)] border flex items-center gap-2 ${processingStage === "transcribing"
-                        ? "bg-blue-600/20 border-blue-500 text-blue-300 font-semibold"
-                        : "bg-[var(--surface-2)] border-[var(--border)] text-[var(--ink-muted)]"
-                      }`}
-                  >
-                    {processingStage === "transcribing" ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-400" />
-                    ) : (
-                      <Check className="h-3.5 w-3.5 text-[var(--success)]" />
-                    )}
-                    <span>1. Deepgram STT</span>
-                  </div>
-
-                  <div
-                    className={`p-2.5 rounded-[var(--radius)] border flex items-center gap-2 ${processingStage === "retrieving"
-                        ? "bg-indigo-600/20 border-indigo-500 text-indigo-300 font-semibold"
-                        : "bg-[var(--surface-2)] border-[var(--border)] text-[var(--ink-muted)]"
-                      }`}
-                  >
-                    {processingStage === "retrieving" ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" />
-                    ) : processingStage === "synthesizing" ? (
-                      <Check className="h-3.5 w-3.5 text-[var(--success)]" />
-                    ) : (
-                      <Sparkles className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
-                    )}
-                    <span>2. Pinecone + RAG</span>
-                  </div>
-
-                  <div
-                    className={`p-2.5 rounded-[var(--radius)] border flex items-center gap-2 ${processingStage === "synthesizing"
-                        ? "bg-cyan-600/20 border-cyan-500 text-cyan-300 font-semibold"
-                        : "bg-[var(--surface-2)] border-[var(--border)] text-[var(--ink-muted)]"
-                      }`}
-                  >
-                    {processingStage === "synthesizing" ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin text-cyan-400" />
-                    ) : (
-                      <Volume2 className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
-                    )}
-                    <span>3. Sarvam Bulbul v3 TTS</span>
-                  </div>
-                </div>
-
-                {liveTranscript && (
-                  <div className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-blue-500/20 text-xs text-[var(--ink)]">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-blue-400 block mb-0.5">
-                      Transcribed Question:
-                    </span>
-                    &ldquo;{liveTranscript}&rdquo;
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 3. SPEAKING STATE & AUTOMATIC BARGE-IN */}
-            {voiceState === "speaking" && (
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-blue-500/20">
-                <div className="flex items-center gap-3">
-                  <div className="h-8 w-8 rounded-full bg-blue-600/20 border border-blue-500/40 text-blue-400 flex items-center justify-center shrink-0">
-                    <Volume2 className="h-4 w-4 animate-pulse text-cyan-400" />
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-white flex items-center gap-1.5">
-                      Sarvam Bulbul v3 Voice Response
-                      <span className="status-pill status-pill-info font-mono text-[10px]">
-                        simran ({detectedLanguage === "mr" ? "mr-IN" : detectedLanguage === "hi" ? "hi-IN" : "en-IN"})
-                      </span>
-                    </span>
-                    <p className="text-[11px] text-[var(--ink-soft)] mt-0.5">
-                      Automatically listening again after answer.
-                    </p>
-                  </div>
-                </div>
-
-                {/* Soundwave Bars & Auto-Barge-in Indicator (NO manual stop/interrupt button) */}
-                <div className="flex items-center gap-2.5 self-end sm:self-auto">
-                  <div className="flex items-center gap-1 h-6 px-3 bg-[var(--surface-2)] rounded-full border border-blue-500/30">
-                    <div className="w-1 bg-cyan-400 rounded-full animate-wave-1" />
-                    <div className="w-1 bg-blue-400 rounded-full animate-wave-2" />
-                    <div className="w-1 bg-indigo-400 rounded-full animate-wave-3" />
-                    <div className="w-1 bg-cyan-400 rounded-full animate-wave-4" />
-                    <div className="w-1 bg-blue-400 rounded-full animate-wave-5" />
-                    <div className="w-1 bg-indigo-400 rounded-full animate-wave-6" />
-                  </div>
-                  <span className="text-[11px] text-cyan-300 font-medium hidden sm:inline">
-                    Speak anytime to interrupt
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Input Form Box — CallNow Card Style with ChatGPT-Style Blue Voice Button */}
-      <div className="card">
-        <div className="card-body space-y-3">
-          <div className="relative">
-            <textarea
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              onKeyDown={handleKeyDown}
-              rows={3}
-              placeholder="Ask a sales question... (e.g. 'What is our refund policy on annual plans?' or 'How do we answer competitor uptime claims?')"
-              className="form-control w-full pr-40 resize-none"
-            />
-
-            {/* Action Bar: Blue Circular Voice Button + Ask Assistant Button */}
-            <div className="absolute right-2.5 bottom-2.5 flex items-center gap-2">
-              {/* THE BLUE CIRCULAR VOICE / WAVEFORM BUTTON */}
-              <button
-                type="button"
-                onClick={handleVoiceButtonClick}
-                className={`w-10 h-10 rounded-full flex items-center justify-center transition-all cursor-pointer select-none focus:outline-none ${voiceState === "idle"
-                    ? "bg-gradient-to-tr from-blue-600 via-indigo-600 to-blue-500 hover:from-blue-500 hover:to-indigo-500 text-white shadow-lg shadow-blue-500/30 hover:scale-105 border border-blue-400/40"
-                    : voiceState === "listening"
-                      ? "bg-gradient-to-tr from-rose-600 to-red-500 text-white shadow-lg shadow-red-500/40 animate-pulse ring-4 ring-red-500/30 scale-105"
-                      : voiceState === "processing"
-                        ? "bg-gradient-to-tr from-blue-700 to-indigo-700 text-white ring-4 ring-blue-500/30"
-                        : "bg-gradient-to-tr from-cyan-600 to-blue-600 text-white shadow-lg shadow-cyan-500/40 ring-4 ring-cyan-500/30"
-                  }`}
-                title={
-                  voiceState === "idle"
-                    ? "Start ChatGPT-style Continuous Voice Mode"
-                    : "Continuous Voice Mode Active — Click to Exit"
-                }
-              >
-                {voiceState === "idle" && (
-                  <Mic className="h-4 w-4 text-white" />
-                )}
-                {voiceState === "listening" && (
-                  <Square className="h-4 w-4 fill-white text-white" />
-                )}
-                {voiceState === "processing" && (
-                  <Loader2 className="h-4 w-4 text-white animate-spin" />
-                )}
-                {voiceState === "speaking" && (
-                  <Mic className="h-4 w-4 text-white animate-pulse" />
-                )}
-              </button>
-
-              {/* Standard Ask Assistant Text Button */}
-              <button
-                onClick={() => handleAsk()}
-                disabled={!question.trim() || isLoading}
-                className="btn btn-primary btn-sm cursor-pointer gap-1.5 disabled:opacity-50 disabled:pointer-events-none"
-              >
-                {isLoading ? (
-                  <>
-                    <div className="h-3 w-3 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                    <span>Searching...</span>
-                  </>
-                ) : (
-                  <>
-                    <span>Ask</span>
-                    <Send className="h-3.5 w-3.5" />
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-
-          {/* Suggested Multilingual Quick Prompts */}
-          <div className="flex flex-wrap items-center gap-1.5 pt-1">
-            <span className="text-[11px] text-[var(--ink-muted)] font-medium mr-1">Quick Prompts:</span>
-            {SUGGESTED_PROMPTS.map((item, idx) => (
-              <button
-                key={idx}
-                onClick={() => {
-                  setQuestion(item.text);
-                  handleAsk(item.text);
-                }}
-                disabled={isLoading || voiceState !== "idle"}
-                className="btn btn-secondary btn-sm text-[11px] text-left truncate max-w-xs cursor-pointer flex items-center gap-1.5"
-              >
-                <span className="text-[9px] px-1 py-0.2 rounded bg-[var(--surface-3)] font-mono text-[var(--accent)] font-semibold">
-                  {item.lang}
-                </span>
-                <span className="truncate">&ldquo;{item.text}&rdquo;</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Error Alert */}
-      {error && (
-        <div className="p-4 rounded-[var(--radius)] bg-[var(--danger-soft)] border border-[var(--danger)]/30 text-[var(--danger)] text-xs flex items-start gap-3">
-          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <p className="font-semibold text-white">Notice</p>
-            <p className="mt-0.5">{error}</p>
-          </div>
-          <button
-            onClick={() => handleAsk()}
-            className="btn btn-danger btn-sm gap-1"
-          >
-            <RotateCcw className="h-3 w-3" />
-            <span>Retry</span>
-          </button>
-        </div>
-      )}
-
-      {/* Loading Shimmer Card */}
-      {isLoading && (
-        <div className="card p-6 space-y-4 animate-pulse">
-          <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-[var(--radius)] bg-[var(--accent-soft)] flex items-center justify-center text-[var(--accent)]">
-              <Bot className="h-4 w-4" />
-            </div>
-            <div>
-              <div className="h-4 w-40 bg-[var(--border)] rounded mb-1" />
-              <p className="text-[11px] text-[var(--accent)] font-medium">
-                Searching Pinecone index &amp; synthesizing grounded answer...
-              </p>
-            </div>
-          </div>
-          <div className="space-y-2">
-            <div className="h-3.5 bg-[var(--border)] rounded w-full" />
-            <div className="h-3.5 bg-[var(--border)] rounded w-5/6" />
-            <div className="h-3.5 bg-[var(--border)] rounded w-3/4" />
-          </div>
-        </div>
-      )}
-
-      {/* Conversation / Answers Feed */}
-      <div className="space-y-4">
-        {messages.length === 0 && !isLoading && voiceState === "idle" && (
-          <div className="card p-12 text-center border-dashed space-y-3">
-            <div className="h-12 w-12 rounded-[var(--radius-lg)] bg-[var(--accent-soft)] text-[var(--accent)] flex items-center justify-center mx-auto">
-              <BookOpen className="h-6 w-6" />
-            </div>
-            <h3 className="text-sm font-semibold text-[var(--ink)]">No questions asked yet</h3>
-            <p className="text-xs text-[var(--ink-soft)] max-w-md mx-auto">
-              Click the <strong className="text-blue-400">blue circular mic button</strong> to start a continuous conversation with Gemini-style automatic silence detection and auto-relisten, or select a quick prompt.
+            <p className="text-sm sm:text-base text-slate-500 font-normal max-w-md mx-auto leading-relaxed">
+              Ask questions about your sales knowledge and get instant answers.
             </p>
           </div>
         )}
 
-        {messages.map((msg) => {
+        {/* Message History */}
+        {messages.length > 0 && (
+          <div className="space-y-6 w-full">
+            {messages.map((msg) => {
           const isThisMsgPlaying = activePlayingMsgId === msg.id && voiceState === "speaking";
 
           return (
-            <div
-              key={msg.id}
-              className={`card overflow-hidden divide-y divide-[var(--border)] transition-all ${isThisMsgPlaying ? "ring-2 ring-blue-500/50 shadow-lg shadow-blue-500/10" : ""
-                }`}
-            >
-              {/* User Question Header */}
-              <div className="p-4 sm:p-5 bg-[var(--surface-2)] flex items-start gap-3">
-                <div className="h-7 w-7 rounded-[var(--radius)] bg-[var(--surface)] border border-[var(--border)] text-[var(--ink-soft)] flex items-center justify-center shrink-0 mt-0.5">
-                  <User className="h-3.5 w-3.5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <span className="text-xs font-semibold text-[var(--ink-soft)]">Sales Question</span>
-                    <span className="text-[10px] text-[var(--ink-muted)]">{msg.timestamp}</span>
+            <div key={msg.id} className="space-y-4">
+              {/* User Message (Right Aligned) */}
+              <div className="flex flex-col items-end">
+                <div className="flex items-start justify-end gap-2.5 max-w-2xl">
+                  <div className="bg-[#E6F7F5] text-slate-800 text-sm sm:text-[15px] font-normal rounded-2xl rounded-tr-xs px-4 py-2.5 shadow-xs border border-teal-100/50">
+                    {msg.question}
                   </div>
-                  <p className="text-sm font-medium text-[var(--ink)]">{msg.question}</p>
+                  <div className="w-7 h-7 rounded-full bg-[#0D7A6F] text-white text-[11px] font-bold flex items-center justify-center shrink-0 shadow-xs mt-0.5">
+                    {userInitials}
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1 pr-9">
+                  {msg.timestamp || "12:45 PM"}
                 </div>
               </div>
 
-              {/* AI Assistant Answer */}
-              <div className="p-4 sm:p-6 space-y-4 bg-[var(--surface)]">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <div className="h-7 w-7 rounded-[var(--radius)] bg-[var(--accent-soft)] text-[var(--accent)] flex items-center justify-center shrink-0">
-                      <Bot className="h-3.5 w-3.5" />
-                    </div>
-                    <div>
-                      <span className="text-xs font-bold text-[var(--ink)] flex items-center gap-1.5 flex-wrap">
-                        Copilot Answer
-                        <span className="badge badge-secondary font-mono text-[10px]">
-                          {msg.model}
-                        </span>
-                        {msg.language && (
-                          <span className="status-pill status-pill-info font-mono text-[10px] py-0 px-1.5 uppercase">
-                            {msg.language === "hi" ? "हिंदी (HI)" : msg.language === "mr" ? "मराठी (MR)" : "English (EN)"}
-                          </span>
-                        )}
-                        {msg.is_greeting && (
-                          <span className="status-pill status-pill-success text-[10px] py-0 px-1.5 flex items-center gap-1">
-                            ✨ Grounded Recommendations
-                          </span>
-                        )}
-                        {isThisMsgPlaying && (
-                          <span className="status-pill status-pill-info font-mono text-[10px] animate-pulse">
-                            Speaking...
-                          </span>
-                        )}
-                      </span>
-                    </div>
+              {/* Assistant Message (Left Aligned) */}
+              <div className="flex flex-col items-start">
+                <div className="flex items-start justify-start gap-2.5 max-w-3xl">
+                  {/* Assistant Avatar with Wave Icon */}
+                  <div className="w-7 h-7 rounded-full bg-[#E6F7F5] border border-teal-200/60 text-[#0D7A6F] flex items-center justify-center shrink-0 shadow-xs mt-0.5">
+                    <svg
+                      className="w-3.5 h-3.5"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                    >
+                      <path d="M12 3v18M8 7v10M16 7v10M4 10v4M20 10v4" />
+                    </svg>
                   </div>
 
-                  <div className="flex items-center gap-1.5">
-                    {/* Speaker / Read Aloud Button */}
-                    <button
-                      onClick={() => playTTSForMessage(msg.id, msg.answer, msg.language)}
-                      className={`btn btn-sm gap-1 text-xs cursor-pointer ${isThisMsgPlaying
-                          ? "btn-danger"
-                          : "btn-secondary"
+                  <div className="bg-[#F3F6FA] text-slate-800 text-sm sm:text-[15px] font-normal rounded-2xl rounded-tl-xs px-5 py-3.5 shadow-xs border border-slate-200/50 space-y-2">
+                    <div className="flex items-center justify-between gap-2 pb-1 border-b border-slate-200/40">
+                      <span className="font-semibold text-xs text-slate-700">
+                        Knowledge Assistant
+                      </span>
+                      <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-teal-50 text-teal-700 border border-teal-200/60 uppercase">
+                        {msg.language || getMessageLanguage(msg.answer, detectedLanguage)}
+                      </span>
+                    </div>
+
+                    <div className="leading-relaxed whitespace-pre-line">
+                      {msg.answer}
+                    </div>
+
+                    {/* Small Controls & Sources */}
+                    <div className="flex items-center gap-3 pt-1.5 border-t border-slate-200/40 text-[11px] text-slate-400">
+                      <button
+                        type="button"
+                        onClick={() => playTTSForMessage(msg.id, msg.answer, msg.language)}
+                        className={`inline-flex items-center gap-1 hover:text-teal-600 transition cursor-pointer ${
+                          isThisMsgPlaying ? "text-teal-600 font-semibold" : ""
                         }`}
-                      title={isThisMsgPlaying ? "Interrupt / Stop Speech" : "Listen to answer via Sarvam Bulbul v3 TTS"}
-                    >
-                      {isThisMsgPlaying ? (
-                        <>
-                          <Square className="h-3 w-3 fill-white" />
-                          <span className="text-[11px]">Stop</span>
-                        </>
-                      ) : (
-                        <>
-                          <Volume2 className="h-3.5 w-3.5 text-blue-400" />
-                          <span className="text-[11px]">Listen</span>
-                        </>
-                      )}
-                    </button>
-
-                    {/* Copy Button */}
-                    <button
-                      onClick={() => handleCopy(msg.answer, msg.id)}
-                      className="btn btn-secondary btn-sm gap-1 text-xs cursor-pointer"
-                      title="Copy Answer"
-                    >
-                      {copiedId === msg.id ? (
-                        <>
-                          <Check className="h-3 w-3 text-[var(--success)]" />
-                          <span className="text-[var(--success)] text-[11px]">Copied</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="h-3 w-3" />
-                          <span className="text-[11px]">Copy</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Fallback Notice Banner */}
-                {msg.fallback_used && (
-                  <div className="p-3 rounded-[var(--radius)] bg-[var(--warning-soft)] border border-[var(--warning)]/30 text-[var(--warning)] text-xs flex items-center gap-2.5">
-                    <ShieldAlert className="h-4 w-4 shrink-0" />
-                    <span>
-                      <strong className="text-white">Information Unavailable:</strong> The indexed playbooks do not contain
-                      verified information for this question. A grounded fallback was returned.
-                    </span>
-                  </div>
-                )}
-
-                {/* Formatted Answer Text */}
-                <div className="text-sm text-[var(--ink)] leading-relaxed whitespace-pre-line font-normal bg-[var(--surface-2)] p-4 rounded-[var(--radius)] border border-[var(--border)]">
-                  {msg.answer}
-                </div>
-
-                {/* Source Tags */}
-                {msg.sources.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-2 text-xs pt-1">
-                    <span className="text-[11px] text-[var(--ink-muted)] font-medium">Sources Cited:</span>
-                    {msg.sources.map((src, sIdx) => (
-                      <span
-                        key={sIdx}
-                        className="badge badge-primary gap-1 text-[11px]"
+                        title="Listen to answer"
                       >
-                        <FileText className="h-3 w-3" />
-                        {src}
-                      </span>
-                    ))}
-                  </div>
-                )}
+                        <Volume2 className="w-3 h-3" />
+                        <span>{isThisMsgPlaying ? "Playing..." : "Listen"}</span>
+                      </button>
 
-                {/* Collapsible Context Chunks Details */}
-                {msg.context_used.length > 0 && (
-                  <div className="pt-2 border-t border-[var(--border)]">
-                    <button
-                      onClick={() => toggleContext(msg.id)}
-                      className="flex items-center gap-1.5 text-xs text-[var(--ink-soft)] hover:text-[var(--ink)] transition cursor-pointer font-medium"
-                    >
-                      {expandedContexts[msg.id] ? (
-                        <>
-                          <ChevronUp className="h-3.5 w-3.5" />
-                          <span>Hide Retrieved Chunks ({msg.context_used.length})</span>
-                        </>
-                      ) : (
-                        <>
-                          <ChevronDown className="h-3.5 w-3.5" />
-                          <span>View Retrieved Chunks ({msg.context_used.length})</span>
-                        </>
+                      <button
+                        type="button"
+                        onClick={() => handleCopy(msg.answer, msg.id)}
+                        className="inline-flex items-center gap-1 hover:text-teal-600 transition cursor-pointer"
+                        title="Copy answer"
+                      >
+                        {copiedId === msg.id ? (
+                          <>
+                            <Check className="w-3 h-3 text-teal-600" />
+                            <span className="text-teal-600">Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>Copy</span>
+                          </>
+                        )}
+                      </button>
+
+                      {msg.sources && msg.sources.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => toggleContext(msg.id)}
+                          className="inline-flex items-center gap-1 text-slate-500 hover:text-slate-800 ml-auto transition cursor-pointer"
+                        >
+                          <FileText className="w-3 h-3 text-teal-600" />
+                          <span>{msg.sources.length} {msg.sources.length === 1 ? "source" : "sources"}</span>
+                          {expandedContexts[msg.id] ? (
+                            <ChevronUp className="w-3 h-3" />
+                          ) : (
+                            <ChevronDown className="w-3 h-3" />
+                          )}
+                        </button>
                       )}
-                    </button>
+                    </div>
 
-                    {expandedContexts[msg.id] && (
-                      <div className="mt-3 space-y-2.5">
+                    {/* Collapsible Source Chunks */}
+                    {expandedContexts[msg.id] && msg.context_used && msg.context_used.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-slate-200/60 space-y-1.5">
                         {msg.context_used.map((chunk, cIdx) => (
-                          <div
-                            key={cIdx}
-                            className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)] text-xs space-y-1.5"
-                          >
-                            <div className="flex items-center justify-between text-[11px] text-[var(--ink-soft)]">
-                              <span className="font-semibold text-[var(--ink)] flex items-center gap-1.5">
-                                <FileText className="h-3 w-3 text-[var(--accent)]" />
-                                {chunk.source || "Document"} (Page {chunk.page ?? 1})
-                              </span>
-                              {chunk.score !== undefined && (
-                                <span className="badge badge-primary font-mono text-[10px]">
-                                  Match: {(chunk.score * 100).toFixed(1)}%
-                                </span>
-                              )}
+                          <div key={cIdx} className="bg-white/80 rounded-lg p-2.5 text-xs border border-slate-200/60">
+                            <div className="font-semibold text-slate-700 text-[11px] mb-0.5">
+                              {chunk.source || "Document"} (Page {chunk.page ?? 1})
                             </div>
-                            <p className="text-[var(--ink-soft)] text-xs italic leading-relaxed pl-2 border-l-2 border-[var(--accent)]">
+                            <p className="text-slate-600 italic text-[11px] leading-relaxed">
                               &ldquo;{chunk.text}&rdquo;
                             </p>
                           </div>
@@ -2413,11 +2096,174 @@ export default function KnowledgeAssistant() {
                       </div>
                     )}
                   </div>
-                )}
+                </div>
+
+                <div className="text-[11px] text-slate-400 mt-1 pl-9">
+                  {msg.timestamp || "12:45 PM"}
+                </div>
               </div>
             </div>
           );
         })}
+          </div>
+        )}
+
+        {/* Loading Indicator */}
+        {isLoading && (
+          <div className="flex flex-col items-start space-y-1">
+            <div className="flex items-start justify-start gap-2.5 max-w-3xl">
+              <div className="w-7 h-7 rounded-full bg-[#E6F7F5] border border-teal-200/60 text-[#0D7A6F] flex items-center justify-center shrink-0 shadow-xs mt-0.5">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              </div>
+              <div className="bg-[#F3F6FA] text-slate-500 text-sm rounded-2xl rounded-tl-xs px-4 py-3 shadow-xs border border-slate-200/50 flex items-center gap-2">
+                <span className="inline-block w-2 h-2 rounded-full bg-teal-500 animate-pulse" />
+                <span>Searching knowledge playbooks &amp; generating answer...</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Centered Compact 96x96px Glowing Blue/Purple Orb when Voice Mode Active */}
+        {(isContinuousMode || voiceState !== "idle") && (
+          <div className="flex flex-col items-center justify-center my-6 py-2 transition-all duration-300">
+            {/* Small unobtrusive controls */}
+            <div className="flex items-center gap-3 mb-4 px-3 py-1 rounded-full bg-slate-50 border border-slate-200/70 shadow-xs">
+              <div className="flex items-center gap-1.5">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+                </span>
+                <span className="text-[11px] font-medium text-slate-600">Ongoing Conversation</span>
+              </div>
+              <div className="h-3 w-px bg-slate-200" />
+              <button
+                type="button"
+                onClick={exitContinuousVoiceMode}
+                className="flex items-center gap-1 text-[11px] font-medium text-rose-500 hover:text-rose-600 transition cursor-pointer"
+                title="Exit Voice Mode"
+              >
+                <PhoneOff className="w-3 h-3" />
+                <span>Exit Voice Mode</span>
+              </button>
+            </div>
+
+            {/* The Compact 96x96px Glowing Blue/Purple Orb */}
+            <div className="relative flex items-center justify-center">
+              {/* Subtle ambient blur glow */}
+              <div className="absolute w-28 h-28 rounded-full bg-gradient-to-tr from-blue-500/30 via-indigo-500/25 to-purple-500/30 blur-xl pointer-events-none animate-pulse" />
+
+              {/* 96x96px Orb Sphere */}
+              <button
+                type="button"
+                onClick={handleVoiceButtonClick}
+                className="relative w-24 h-24 rounded-full flex items-center justify-center cursor-pointer transition-transform duration-300 hover:scale-105 active:scale-95 shadow-[0_0_24px_rgba(99,102,241,0.45),inset_0_0_20px_rgba(255,255,255,0.35)] overflow-hidden focus:outline-none"
+                style={{
+                  background: "radial-gradient(circle at 35% 30%, #a5b4fc 0%, #6366f1 35%, #4f46e5 65%, #312e81 100%)",
+                  width: "96px",
+                  height: "96px",
+                }}
+                title="Voice active · Click to pause/exit"
+              >
+                {/* Specular highlight curve matching Image 2 */}
+                <div
+                  className="absolute top-1 left-2.5 w-14 h-7 rounded-full pointer-events-none opacity-60"
+                  style={{
+                    background: "linear-gradient(180deg, rgba(255,255,255,0.75) 0%, rgba(255,255,255,0) 100%)",
+                    transform: "rotate(-25deg)",
+                  }}
+                />
+                {/* Secondary soft bottom light */}
+                <div
+                  className="absolute bottom-1 right-2 w-10 h-5 rounded-full pointer-events-none opacity-40"
+                  style={{
+                    background: "linear-gradient(0deg, rgba(165,180,252,0.8) 0%, rgba(165,180,252,0) 100%)",
+                  }}
+                />
+
+                {/* 28–30px Microphone Icon inside the orb */}
+                <div className="relative z-10 text-white drop-shadow-sm flex items-center justify-center">
+                  <svg
+                    className="w-7 h-7"
+                    style={{ width: "28px", height: "28px" }}
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    <line x1="12" x2="12" y1="19" y2="22" />
+                  </svg>
+                </div>
+              </button>
+            </div>
+
+            {/* "Listening..." directly below the orb */}
+            <div className="mt-3 text-center">
+              <span className="text-sm font-medium text-slate-600 tracking-tight">
+                {voiceState === "processing" ? "Thinking..." : voiceState === "speaking" ? "Speaking..." : "Listening..."}
+              </span>
+              {liveTranscript && (
+                <p className="text-xs text-slate-500 mt-1 max-w-sm truncate italic">
+                  &ldquo;{liveTranscript}&rdquo;
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Bottom Search/Input Bar */}
+      <div className="sticky bottom-4 z-20 w-full max-w-3xl mx-auto px-4 mt-auto pt-2">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleAsk();
+          }}
+          className="relative flex items-center bg-white border border-slate-200/90 rounded-full shadow-[0_2px_12px_rgba(0,0,0,0.04)] px-4 py-2 hover:border-slate-300 focus-within:border-teal-500 focus-within:ring-2 focus-within:ring-teal-100 transition-all"
+        >
+          <input
+            type="text"
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleAsk();
+              }
+            }}
+            placeholder="Ask a question... (e.g. What is our refund policy on annual plans?)"
+            className="flex-1 bg-transparent border-none outline-none text-sm text-slate-800 placeholder-slate-400 px-2 py-1"
+          />
+
+          <div className="flex items-center gap-1.5 shrink-0 ml-2">
+            {/* Small microphone button: only shown when idle */}
+            {voiceState === "idle" && (
+              <button
+                type="button"
+                onClick={handleVoiceButtonClick}
+                className="p-2 rounded-full text-slate-500 hover:text-teal-600 hover:bg-slate-100 transition cursor-pointer"
+                title="Start Voice Assistant"
+              >
+                <Mic className="w-5 h-5" />
+              </button>
+            )}
+
+            {/* Ask Button */}
+            <button
+              type="submit"
+              disabled={!question.trim() || isLoading}
+              className="bg-teal-600 hover:bg-teal-700 text-white px-4 py-1.5 rounded-full text-xs font-semibold flex items-center gap-1.5 shadow-sm transition disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+            >
+              <span>Ask</span>
+              <Send className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

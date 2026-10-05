@@ -120,6 +120,35 @@ SCALE_MULTIPLIERS: Dict[str, int] = {
     "koti": 10000000,
 }
 
+# Indian fractional number words
+FRACTIONAL_WORDS: Dict[str, float] = {
+    # 1.5
+    "डेढ़": 1.5,
+    "डेढ": 1.5,
+    "dedh": 1.5,
+    "दीड": 1.5,
+    "deed": 1.5,
+    # 2.5
+    "ढाई": 2.5,
+    "dhai": 2.5,
+    "अडीच": 2.5,
+    "adeech": 2.5,
+    # 1.25
+    "सव्वा": 1.25,
+    "savva": 1.25,
+    "सवा": 1.25,
+    "sawa": 1.25,
+    # 0.75
+    "पावणे": 0.75,
+    "पौने": 0.75,
+    "paune": 0.75,
+}
+
+# Prefix modifiers
+HALF_PREFIXES = {"साढ़े", "साडे", "saadhe", "saade"}
+QUARTER_LESS_PREFIXES = {"पावणे", "paune", "पौने"}
+QUARTER_MORE_PREFIXES = {"सव्वा", "savva", "सवा", "sawa"}
+
 # English tens words that combine with units
 ENGLISH_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
 ENGLISH_UNITS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
@@ -154,9 +183,30 @@ def parse_compound_english_number(words: list[str], start_idx: int) -> Tuple[Opt
     return None, 0
 
 
+REPEATER_WORDS: Dict[str, int] = {
+    "double": 2,
+    "triple": 3,
+    "treble": 3,
+    "डबल": 2,
+    "ट्रिपल": 3,
+}
+
+DEVANAGARI_DIGITS_MAP = str.maketrans("०१२३४५६७८९", "0123456789")
+
+
+def _get_single_digit(word: str) -> Optional[str]:
+    """Returns single digit string '0'-'9' if word represents a single digit in EN, HI, MR."""
+    w = word.strip().lower()
+    if w.isdigit() and len(w) == 1:
+        return w
+    if w in CARDINAL_NUMBERS and 0 <= CARDINAL_NUMBERS[w] <= 9:
+        return str(CARDINAL_NUMBERS[w])
+    return None
+
+
 def normalize_spoken_numbers(text: str) -> str:
     """
-    Normalizes spoken number words into digits in text across English, Hindi, and Marathi.
+    Normalizes spoken number words into digits in text across English, Hindi, Marathi, and mixed speech.
 
     Examples:
         "thirty five months" -> "35 months"
@@ -168,17 +218,30 @@ def normalize_spoken_numbers(text: str) -> str:
         "twenty five lakh" -> "25 lakh"
         "पच्चीस लाख" -> "25 लाख"
         "पंचवीस लाख" -> "25 लाख"
+        "ढाई लाख" -> "2.5 लाख"
+        "डेढ़ लाख" -> "1.5 लाख"
+        "दीड वर्ष" -> "1.5 वर्ष"
+        "अडीच वर्षे" -> "2.5 वर्षे"
         "nine eight seven six five four three two one zero" -> "9876543210"
+        "double nine eight seven six five four three two one" -> "9987654321"
     """
     if not text or not isinstance(text, str):
         return ""
 
-    tokens = re.split(r"(\s+|[.,;?!])", text)
+    # Pre-pass 1: Translate Devanagari numerals (०-९ -> 0-9)
+    preprocessed = text.translate(DEVANAGARI_DIGITS_MAP)
+
+    # Pre-pass 2: Un-format smart-formatted times inside numeric speech (e.g. 9:00 -> 900, 9:30 -> 930, 2:00 -> 200, 0:00 -> 000)
+    preprocessed = re.sub(r"(\b\d{1,2})\s*:\s*(\d{2})\b", r"\1\2", preprocessed)
+
+    # Pre-pass 3: Handle compound Hindi/Marathi forms like 'साडेतीन' -> 'साडे तीन', 'साडेचार' -> 'साडे चार'
+    preprocessed = re.sub(r"\bसाडे([एक|दोन|तीन|चार|पाच|सहा|सात|आठ|नऊ|दहा])", r"साडे \1", preprocessed)
+    preprocessed = re.sub(r"\bसाढ़े([एक|दो|तीन|चार|पांच|पाँच|छह|सात|आठ|नौ|दस])", r"साढ़े \1", preprocessed)
+
+    tokens = re.split(r"(\s+|[.,;?!])", preprocessed)
     result_tokens = []
     i = 0
 
-    # First pass: check for sequences of single digits (e.g. phone number digit dictation)
-    # e.g. "nine eight seven six five four three two one zero"
     while i < len(tokens):
         token = tokens[i]
         clean_token = token.strip().lower()
@@ -186,6 +249,106 @@ def normalize_spoken_numbers(text: str) -> str:
         # If whitespace or punctuation, preserve
         if not clean_token or not re.search(r"[\w\u0900-\u097F]", clean_token):
             result_tokens.append(token)
+            i += 1
+            continue
+
+        # Check for 'double' or 'triple' digit dictation: e.g. "double nine", "triple five", "डबल नौ"
+        if clean_token in REPEATER_WORDS and i + 1 < len(tokens):
+            multiplier = REPEATER_WORDS[clean_token]
+            # Look ahead for digit
+            j = i + 1
+            while j < len(tokens) and (not tokens[j].strip() or tokens[j].strip() in (",", ".", "-", ";", ":")):
+                j += 1
+            if j < len(tokens):
+                nxt_digit = _get_single_digit(tokens[j].strip().lower())
+                if nxt_digit:
+                    expanded_digits = nxt_digit * multiplier
+                    # Look ahead further for phone sequence
+                    seq = [expanded_digits]
+                    k = j + 1
+                    last_idx = j
+                    while k < len(tokens):
+                        tk_str = tokens[k].strip()
+                        if not tk_str or tk_str in (",", ".", "-", ";", ":"):
+                            k += 1
+                            continue
+                        d = _get_single_digit(tk_str.lower())
+                        if d:
+                            seq.append(d)
+                            last_idx = k
+                            k += 1
+                        elif tk_str.lower() in REPEATER_WORDS and k + 1 < len(tokens):
+                            m_mult = REPEATER_WORDS[tk_str.lower()]
+                            next_k = k + 1
+                            while next_k < len(tokens) and (not tokens[next_k].strip() or tokens[next_k].strip() in (",", ".", "-", ";", ":")):
+                                next_k += 1
+                            if next_k < len(tokens):
+                                kd = _get_single_digit(tokens[next_k].strip().lower())
+                                if kd:
+                                    seq.append(kd * m_mult)
+                                    last_idx = next_k
+                                    k = next_k + 1
+                                    continue
+                            break
+                        else:
+                            break
+                    joined_seq = "".join(seq)
+                    if len(joined_seq) >= 7:
+                        result_tokens.append(joined_seq)
+                        i = last_idx + 1
+                        continue
+                    else:
+                        result_tokens.append(expanded_digits)
+                        i = j + 1
+                        continue
+
+        # Check for fractional prefixes: "साढ़े तीन" -> "3.5", "साडे तीन" -> "3.5", "saadhe teen" -> "3.5"
+        if clean_token in HALF_PREFIXES:
+            j = i + 1
+            while j < len(tokens) and tokens[j].isspace():
+                j += 1
+            if j < len(tokens):
+                nxt_word = tokens[j].strip().lower()
+                if nxt_word in CARDINAL_NUMBERS:
+                    base_val = CARDINAL_NUMBERS[nxt_word]
+                    result_tokens.append(f"{base_val + 0.5:g}")
+                    i = j + 1
+                    continue
+
+        # Check for quarter-less prefix: "पावणे पाच" -> "4.75"
+        if clean_token in QUARTER_LESS_PREFIXES:
+            j = i + 1
+            while j < len(tokens) and tokens[j].isspace():
+                j += 1
+            if j < len(tokens):
+                nxt_word = tokens[j].strip().lower()
+                if nxt_word in CARDINAL_NUMBERS:
+                    base_val = CARDINAL_NUMBERS[nxt_word]
+                    result_tokens.append(f"{base_val - 0.25:g}")
+                    i = j + 1
+                    continue
+
+        # Check for quarter-more prefix: "सव्वा दोन" -> "2.25", or standalone "सव्वा" before scale (e.g. "सव्वा लाख" -> "1.25 लाख")
+        if clean_token in QUARTER_MORE_PREFIXES:
+            j = i + 1
+            while j < len(tokens) and tokens[j].isspace():
+                j += 1
+            if j < len(tokens):
+                nxt_word = tokens[j].strip().lower()
+                if nxt_word in CARDINAL_NUMBERS:
+                    base_val = CARDINAL_NUMBERS[nxt_word]
+                    result_tokens.append(f"{base_val + 0.25:g}")
+                    i = j + 1
+                    continue
+                elif nxt_word in SCALE_MULTIPLIERS:
+                    result_tokens.append("1.25")
+                    i += 1
+                    continue
+
+        # Check standalone fractional words: "ढाई" -> "2.5", "डेढ़" -> "1.5", "दीड" -> "1.5", "अडीच" -> "2.5"
+        if clean_token in FRACTIONAL_WORDS:
+            frac_val = FRACTIONAL_WORDS[clean_token]
+            result_tokens.append(f"{frac_val:g}")
             i += 1
             continue
 
@@ -199,11 +362,8 @@ def normalize_spoken_numbers(text: str) -> str:
 
         # Look ahead for English two-word numbers: e.g. "thirty", " ", "five"
         if clean_token in ENGLISH_TENS:
-            # Check next non-whitespace token
             j = i + 1
-            ws = ""
             while j < len(tokens) and tokens[j].isspace():
-                ws += tokens[j]
                 j += 1
             if j < len(tokens) and tokens[j].strip().lower() in ENGLISH_UNITS:
                 val = ENGLISH_TENS[clean_token] + ENGLISH_UNITS[tokens[j].strip().lower()]
@@ -215,33 +375,47 @@ def normalize_spoken_numbers(text: str) -> str:
                 i += 1
                 continue
 
-        # Check cardinal single-word numbers (English, Hindi, Marathi)
-        if clean_token in CARDINAL_NUMBERS:
-            val = CARDINAL_NUMBERS[clean_token]
-
-            # Check if this is part of a consecutive single-digit sequence (phone number)
-            # Peek ahead to see if multiple digits follow
-            digit_seq = [str(val)]
-            j = i + 1
-            temp_j = j
+        # Check single-digit word sequence for phone numbers (e.g. 7-10 consecutive spoken/written digits)
+        first_d = _get_single_digit(clean_token)
+        if first_d is not None:
+            digit_seq = [first_d]
+            last_digit_idx = i
+            temp_j = i + 1
             while temp_j < len(tokens):
-                nxt = tokens[temp_j]
-                if nxt.isspace():
+                nxt_str = tokens[temp_j].strip()
+                if not nxt_str or nxt_str in (",", ".", "-", ";", ":"):
                     temp_j += 1
                     continue
-                nxt_clean = nxt.strip().lower()
-                # If next is a single-digit word (0-9)
-                if nxt_clean in CARDINAL_NUMBERS and 0 <= CARDINAL_NUMBERS[nxt_clean] <= 9:
-                    digit_seq.append(str(CARDINAL_NUMBERS[nxt_clean]))
+                d = _get_single_digit(nxt_str.lower())
+                if d is not None:
+                    digit_seq.append(d)
+                    last_digit_idx = temp_j
                     temp_j += 1
+                elif nxt_str.lower() in REPEATER_WORDS and temp_j + 1 < len(tokens):
+                    mult = REPEATER_WORDS[nxt_str.lower()]
+                    # find next digit
+                    k = temp_j + 1
+                    while k < len(tokens) and (not tokens[k].strip() or tokens[k].strip() in (",", ".", "-", ";", ":")):
+                        k += 1
+                    if k < len(tokens):
+                        kd = _get_single_digit(tokens[k].strip().lower())
+                        if kd is not None:
+                            digit_seq.append(kd * mult)
+                            last_digit_idx = k
+                            temp_j = k + 1
+                            continue
+                    break
                 else:
                     break
 
-            if len(digit_seq) >= 7:  # Long sequence of digits, clearly a phone number!
+            if len("".join(digit_seq)) >= 7:  # Long sequence of digits, clearly a phone number!
                 result_tokens.append("".join(digit_seq))
-                i = temp_j
+                i = last_digit_idx + 1
                 continue
 
+        # Check cardinal single-word numbers (English, Hindi, Marathi)
+        if clean_token in CARDINAL_NUMBERS:
+            val = CARDINAL_NUMBERS[clean_token]
             result_tokens.append(str(val))
             i += 1
             continue
@@ -255,7 +429,8 @@ def normalize_spoken_numbers(text: str) -> str:
 def parse_numeric_phrase(text: str) -> Optional[float]:
     """
     Parses a spoken or numeric phrase into a number.
-    e.g., 'thirty five' -> 35.0, '25 lakh' -> 2500000.0, 'पैंतीस' -> 35.0
+    e.g., 'thirty five' -> 35.0, '25 lakh' -> 2500000.0, 'पैंतीस' -> 35.0,
+          'ढाई लाख' -> 250000.0, 'दीड लाख' -> 150000.0
     """
     if not text:
         return None

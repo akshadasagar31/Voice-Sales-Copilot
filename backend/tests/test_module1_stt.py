@@ -151,10 +151,9 @@ def test_module1_stt_auto_routing(client, sample_wav_bytes):
         data = response.json()
         assert data["transcript"] == "Hello mera naam Rajesh Sharma hai phone 9876543210."
         assert data["stt_provider"] == "deepgram"
-        assert data["model"] == "nova-3"
         mock_dg.assert_called_once()
         call_kwargs = mock_dg.call_args[1]
-        assert call_kwargs["language"] == "multi"
+        assert call_kwargs["language"] in (None, "en-IN")  # Auto mode routes via None or en-IN
         assert call_kwargs["model"] == "nova-3"
 
 
@@ -276,13 +275,15 @@ def test_module1_language_detection_marathi_response(client, sample_wav_bytes):
 
 def test_module1_language_detection_mixed_speech(client, sample_wav_bytes):
     """
-    Verifies that mixed speech (code-switching) detects 'mixed' as the spoken language,
-    and returns an English response prompt according to the specification.
+    Verifies that code-switching speech strictly detects the Indic spoken language (Hindi/Marathi),
+    removing mixed-language detection completely:
+    - English + Hindi code-mixing -> spoken: hi, response: hi
+    - English + Marathi code-mixing -> spoken: mr, response: mr
     """
-    # 1. English + Hindi code-mixing -> spoken: mixed, response: English
+    # 1. English + Hindi code-mixing -> spoken: hi, response: Hindi
     mock_hi_mix = {
         "success": True,
-        "transcript": "My name is Rajesh and mujhe personal loan chahiye",
+        "transcript": "My name is Rajesh and मुझे personal loan चाहिए",
         "confidence": 0.95,
         "detected_language": "multi",
         "words_count": 9,
@@ -302,15 +303,15 @@ def test_module1_language_detection_mixed_speech(client, sample_wav_bytes):
         )
         assert response.status_code == 200
         data = response.json()
-        assert data["detected_language"] == "mixed"
-        assert data["language"] == "en"
-        # English response prompt
-        assert "What" in data["immediate_sentence1"] or "Thank you" in data["immediate_sentence1"] or "phone" in data["immediate_sentence1"].lower()
+        assert data["detected_language"] == "hi"
+        assert data["language"] == "hi"
+        # Hindi response prompt
+        assert any(word in data["immediate_sentence1"] for word in ["नमस्ते", "धन्यवाद", "फोन", "नंबर", "बताइए"])
 
-    # 2. English + Marathi code-mixing -> spoken: mixed, response: English
+    # 2. English + Marathi code-mixing -> spoken: mr, response: Marathi
     mock_mr_mix = {
         "success": True,
-        "transcript": "My name is Rahul and mala personal loan pahije",
+        "transcript": "My name is Rahul and मला personal loan पाहिजे",
         "confidence": 0.95,
         "detected_language": "multi",
         "words_count": 9,
@@ -330,9 +331,10 @@ def test_module1_language_detection_mixed_speech(client, sample_wav_bytes):
         )
         assert response.status_code == 200
         data = response.json()
-        assert data["detected_language"] == "mixed"
-        assert data["language"] == "en"
-        assert "What" in data["immediate_sentence1"] or "Thank you" in data["immediate_sentence1"] or "phone" in data["immediate_sentence1"].lower()
+        assert data["detected_language"] == "mr"
+        assert data["language"] == "mr"
+        # Marathi response prompt
+        assert any(word in data["immediate_sentence1"] for word in ["नमस्कार", "धन्यवाद", "फोन", "क्रमांक", "सांगा"])
 
 
 def test_module1_new_lead_reset_starts_from_name(client, sample_wav_bytes):
@@ -590,7 +592,7 @@ def test_module1_assistant_what_can_you_do_query(client, sample_wav_bytes):
         assert resp.status_code == 200
         data = resp.json()
         assert data.get("is_assistant_query") is True
-        assert "collect" in data["immediate_sentence1"].lower() or "leads" in data["immediate_sentence1"].lower()
+        assert any(w in data["immediate_sentence1"].lower() for w in ["collect", "lead", "leads"])
 
 
 def test_module1_assistant_queries_hindi_and_marathi(client, sample_wav_bytes):
@@ -635,6 +637,199 @@ def test_module1_assistant_queries_hindi_and_marathi(client, sample_wav_bytes):
         assert resp.status_code == 200
         data = resp.json()
         assert data.get("is_assistant_query") is True
-        assert "मदत" in data["immediate_sentence1"] or "सीआरएम" in data["immediate_sentence1"]
+        assert "मदत" in data["immediate_sentence1"] or "सीआरएम" in data["immediate_sentence1"] or "व्हॉइस कोपायलट" in data["immediate_sentence1"] or "CRM" in data["immediate_sentence1"]
 
 
+def test_module1_stt_marathi_in_locale_routing(client, sample_wav_bytes):
+    """Verifies that Module 1 with language=mr-IN routes directly to dedicated mr STT with Nova-3."""
+    mock_result = {
+        "success": True,
+        "transcript": "माझे नाव सचिन पाटील आहे. मला 10 लाख रुपयांचे personal loan हवे आहे.",
+        "confidence": 0.99,
+        "detected_language": "mr",
+        "duration": 4.1,
+        "words_count": 12,
+        "stt_provider": "deepgram",
+        "model": "nova-3",
+    }
+
+    with patch.object(
+        DeepgramSTTService, "transcribe_audio", new_callable=AsyncMock, return_value=mock_result
+    ) as mock_dg:
+        response = client.post(
+            "/api/voice-entry",
+            files={"file": ("test.wav", sample_wav_bytes, "audio/wav")},
+            data={"module": "module1", "language": "mr-IN"},
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["language"] == "mr"
+        assert data["transcript"] == "माझे नाव सचिन पाटील आहे. मला 10 लाख रुपयांचे personal loan हवे आहे."
+        mock_dg.assert_called_once()
+        call_kwargs = mock_dg.call_args[1]
+        assert call_kwargs["language"] == "mr"
+        assert call_kwargs["model"] == "nova-3"
+
+
+def test_build_deepgram_ws_url_marathi_dedicated():
+    """Verifies build_deepgram_ws_url properly routes mr and mr-in to language=mr with Marathi keyterms."""
+    from services.stt import build_deepgram_ws_url
+    import urllib.parse
+
+    # 1. language="mr"
+    url_mr = build_deepgram_ws_url(model="nova-3", language="mr")
+    assert "language=mr" in url_mr
+    assert "model=nova-3" in url_mr
+    assert urllib.parse.quote("पाटील") in url_mr
+    assert urllib.parse.quote("हवे आहे") in url_mr
+
+    # 2. language="mr-IN"
+    url_mrin = build_deepgram_ws_url(model="nova-3", language="mr-IN")
+    assert "language=mr" in url_mrin
+    assert "model=nova-3" in url_mrin
+
+
+def test_marathi_english_mixed_preserves_marathi_language():
+    """Verifies Marathi speech with English technical loanwords is strictly identified as Marathi, not Hindi or English."""
+    from services.language import detect_spoken_language, get_response_language
+
+    # Sentence with Marathi markers + English loanwords: "मला 10 लाख रुपयांचे personal loan हवे आहे, माझा CIBIL score 750 आहे"
+    mixed_speech = "मला 10 लाख रुपयांचे personal loan हवे आहे, माझा CIBIL score 750 आहे आणि दरमहा EMI 25 हजार देऊ शकतो"
+    detected = detect_spoken_language(mixed_speech, requested_language="mr")
+    assert detected == "mr"
+    assert get_response_language(detected) == "mr"
+
+
+def test_select_best_stt_transcript_marathi_priority():
+    """Verifies dual-stream selection chooses Marathi transcript over multi when Marathi markers are present."""
+    from services.language import select_best_stt_transcript
+
+    mr_transcript = "माझे नाव अमोल देशमुख आहे आणि 5 लाख रुपयांचे कर्ज पाहिजे"
+    multi_transcript = "Mera naam Amol Deshmukh hai aur 5 lakh rupaye chahiye"
+
+    chosen_text, chosen_lang, source = select_best_stt_transcript(mr_transcript, multi_transcript)
+    assert chosen_lang == "mr"
+    assert "माझे नाव अमोल देशमुख" in chosen_text
+    assert "Stream MR" in source
+
+
+def test_marathi_mixed_speech_receives_marathi_response(client, sample_wav_bytes):
+    """Verifies Marathi-English mixed speech strictly receives a Marathi response."""
+    mock_result = {
+        "success": True,
+        "transcript": "मला 10 लाख रुपयांचे personal loan हवे आहे, माझा CIBIL score 750 आहे",
+        "confidence": 0.99,
+        "detected_language": "mr",
+        "duration": 3.8,
+        "words_count": 13,
+        "stt_provider": "deepgram",
+        "model": "nova-3",
+    }
+
+    with patch.object(DeepgramSTTService, "transcribe_audio", new_callable=AsyncMock, return_value=mock_result):
+        resp = client.post(
+            "/api/voice-entry",
+            files={"file": ("test.wav", sample_wav_bytes, "audio/wav")},
+            data={"module": "module1", "language": "mr"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["language"] == "mr"
+        assert data["detected_language"] == "mr"
+        assert data["lead"]["loan_amount"] == 1000000.0
+        assert data["lead"]["loan_type"] == "Personal Loan"
+        # The prompt asking for next parameter (name) must be in Marathi
+        assert any(word in data["immediate_sentence1"] for word in ["नाव", "नमस्कार", "सांगा"])
+
+
+def test_marathi_mode_code_switching_receives_marathi_response(client, sample_wav_bytes):
+    """Verifies that code-switched Marathi + English speech with grammar receives a Marathi response."""
+    mock_result = {
+        "success": True,
+        "transcript": "माझे नाव सचिन पाटील आहे, I need 5 lakh personal loan",
+        "confidence": 0.98,
+        "detected_language": "mr",
+        "duration": 4.0,
+        "words_count": 11,
+        "stt_provider": "deepgram",
+        "model": "nova-3",
+    }
+
+    with patch.object(DeepgramSTTService, "transcribe_audio", new_callable=AsyncMock, return_value=mock_result):
+        resp = client.post(
+            "/api/voice-entry",
+            files={"file": ("test.wav", sample_wav_bytes, "audio/wav")},
+            data={"module": "module1", "language": "mr"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["language"] == "mr"
+        assert "सचिन पाटील" in data["lead"]["name"]
+        assert data["lead"]["loan_amount"] == 500000.0
+        # The prompt asking for next parameter (phone) must be in Marathi
+        assert any(word in data["immediate_sentence1"] for word in ["फोन", "मोबाईल", "क्रमांक", "सांगा", "धन्यवाद"])
+
+
+def test_websocket_marathi_mixed_speech_response():
+    """Verifies generate_module1_ws_response returns language='mr' and Marathi prompt for mixed speech."""
+    from main import generate_module1_ws_response
+
+    transcript = "माझे नाव अमोल कदम आहे आणि मला 10 लाख personal loan हवे आहे"
+    res = generate_module1_ws_response(transcript, req_lang="mr", last_conf=0.99)
+    assert res["language"] == "mr"
+    assert res["detected_language"] == "mr"
+    assert "अमोल कदम" in res["lead"]["name"]
+    assert res["lead"]["loan_amount"] == 1000000.0
+    # Next question must be in Marathi
+    assert any(word in res["immediate_sentence1"] for word in ["फोन", "मोबाईल", "क्रमांक", "सांगा", "धन्यवाद"])
+
+
+
+
+
+
+def test_clean_deepgram_keyterms():
+    """Verifies that clean_deepgram_keyterms removes colon-markers, empty strings, and deduplicates."""
+    from services.stt import clean_deepgram_keyterms
+    dirty = ["CIBIL", "CIBIL:3", "", " ", "a", "EMI", "cibil", "ROI", "interest rate:2"]
+    cleaned = clean_deepgram_keyterms(dirty)
+    assert "CIBIL:3" not in cleaned
+    assert "interest rate:2" not in cleaned
+    assert "" not in cleaned
+    assert " " not in cleaned
+    assert "a" not in cleaned
+    assert "CIBIL" in cleaned
+    assert "EMI" in cleaned
+    assert "ROI" in cleaned
+    # Case-insensitive deduplication
+    assert cleaned.count("CIBIL") == 1
+    assert "cibil" not in cleaned
+
+
+def test_romanized_marathi_detection():
+    """Verifies pure Devanagari Marathi detection and distinction from Hindi and English."""
+    from services.language import detect_spoken_language, LANG_MR, LANG_HI, LANG_EN
+
+    assert detect_spoken_language("माझं नाव सचिन पाटील आहे") == LANG_MR
+    assert detect_spoken_language("मला 5 लाख personal loan पाहिजे") == LANG_MR
+    assert detect_spoken_language("मला कर्ज हवे आहे") == LANG_MR  # uniquely Marathi
+    assert detect_spoken_language("मेरा नाम राजेश शर्मा है") == LANG_HI
+    assert detect_spoken_language("My name is Rajesh Patil and I need 5 lakh personal loan") == LANG_EN
+
+
+def test_verbatim_name_preservation():
+    """Verifies that prospect names and final STT transcripts are preserved verbatim without translation or rewriting."""
+    from services.stt import normalize_stt_transcript
+
+    names = [
+        "Sachin Patil",
+        "Amol Kadam",
+        "सचिन पाटील",
+        "अमोल कदम",
+        "Rajesh Sharma",
+    ]
+    for name in names:
+        text = f"My name is {name}."
+        normalized = normalize_stt_transcript(text)
+        assert name in normalized

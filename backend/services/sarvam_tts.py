@@ -32,38 +32,62 @@ logger = logging.getLogger(__name__)
 
 SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
 DEFAULT_SARVAM_MODEL = "bulbul:v3"
-DEFAULT_SARVAM_MARATHI_VOICE = os.getenv("SARVAM_MARATHI_VOICE", "simran").strip().lower()
-DEFAULT_SARVAM_HINDI_VOICE = os.getenv("SARVAM_HINDI_VOICE", "simran").strip().lower()
+DEFAULT_SARVAM_MARATHI_VOICE = os.getenv("SARVAM_MODULE1_MARATHI_VOICE", os.getenv("SARVAM_MARATHI_VOICE", "ritu")).strip().lower()
+DEFAULT_SARVAM_HINDI_VOICE = os.getenv("SARVAM_MODULE1_HINDI_VOICE", os.getenv("SARVAM_HINDI_VOICE", "priya")).strip().lower()
 DEFAULT_SARVAM_ENGLISH_VOICE = os.getenv("SARVAM_ENGLISH_VOICE", "simran").strip().lower()
 DEFAULT_SARVAM_VOICE = DEFAULT_SARVAM_MARATHI_VOICE
 SARVAM_TIMEOUT = 30.0
 
 import asyncio
 
-_shared_sarvam_client: Optional[httpx.AsyncClient] = None
+_shared_sarvam_clients: dict[int, httpx.AsyncClient] = {}
+_sarvam_service_cache: dict[str, "SarvamTTSService"] = {}
 
 
 def get_shared_sarvam_client() -> httpx.AsyncClient:
     """Return a shared persistent AsyncClient with keep-alive connection pooling for Sarvam TTS."""
-    global _shared_sarvam_client
     try:
-        current_loop = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
+        loop_id = id(loop)
     except RuntimeError:
-        current_loop = None
+        loop_id = 0
 
-    if _shared_sarvam_client is not None and not _shared_sarvam_client.is_closed:
-        transport = getattr(_shared_sarvam_client, "_transport", None)
-        pool = getattr(transport, "_pool", None)
-        loop = getattr(pool, "_loop", None)
-        if loop is not None and (loop.is_closed() or (current_loop is not None and loop is not current_loop)):
-            _shared_sarvam_client = None
-
-    if _shared_sarvam_client is None or _shared_sarvam_client.is_closed:
-        _shared_sarvam_client = httpx.AsyncClient(
+    client = _shared_sarvam_clients.get(loop_id)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
             timeout=SARVAM_TIMEOUT,
-            limits=httpx.Limits(max_keepalive_connections=15, max_connections=30, keepalive_expiry=30.0),
+            limits=httpx.Limits(max_keepalive_connections=20, max_connections=40, keepalive_expiry=120.0),
         )
-    return _shared_sarvam_client
+        if loop_id != 0:
+            _shared_sarvam_clients[loop_id] = client
+    return client
+
+
+async def prewarm_sarvam_client(api_key: Optional[str] = None) -> bool:
+    """Pre-warms the persistent TLS socket to api.sarvam.ai to avoid cold handshake latency on turn 1."""
+    key = (api_key or os.getenv("SARVAM_API_KEY", "")).strip()
+    if not key:
+        return False
+    try:
+        client = get_shared_sarvam_client()
+        resp = await client.post(
+            SARVAM_TTS_URL,
+            headers={"api-subscription-key": key, "Content-Type": "application/json"},
+            json={"text": "Hi", "model": DEFAULT_SARVAM_MODEL, "language_code": "en-IN", "speaker": "simran"},
+        )
+        logger.info(f"[SarvamTTS] Connection pre-warmed successfully (status={resp.status_code})")
+        return resp.status_code == 200
+    except Exception as e:
+        logger.debug(f"[SarvamTTS] Pre-warm notice: {e}")
+        return False
+
+
+def get_sarvam_tts_service(api_key: Optional[str] = None) -> "SarvamTTSService":
+    """Return a cached SarvamTTSService instance to eliminate per-request instantiation and disk I/O."""
+    key = (api_key or os.getenv("SARVAM_API_KEY", "")).strip()
+    if key not in _sarvam_service_cache:
+        _sarvam_service_cache[key] = SarvamTTSService(api_key=key if api_key else None)
+    return _sarvam_service_cache[key]
 
 
 class SarvamTTSError(Exception):
@@ -199,18 +223,22 @@ class SarvamTTSService:
         if self._explicit_key:
             self.api_key = (api_key or "").strip()
         else:
-            env_file = Path(__file__).resolve().parent.parent / ".env"
-            if env_file.exists():
-                load_dotenv(dotenv_path=env_file, override=True)
             self.api_key = os.getenv("SARVAM_API_KEY", "").strip()
+            if not self.api_key:
+                env_file = Path(__file__).resolve().parent.parent / ".env"
+                if env_file.exists():
+                    load_dotenv(dotenv_path=env_file, override=False)
+                self.api_key = os.getenv("SARVAM_API_KEY", "").strip()
 
     def _validate_api_key(self) -> None:
-        """Validates that SARVAM_API_KEY is configured."""
-        if not self._explicit_key:
-            env_file = Path(__file__).resolve().parent.parent / ".env"
-            if env_file.exists():
-                load_dotenv(dotenv_path=env_file, override=True)
+        """Validates that SARVAM_API_KEY is configured without redundant disk I/O."""
+        if not self._explicit_key and not self.api_key:
             self.api_key = os.getenv("SARVAM_API_KEY", "").strip()
+            if not self.api_key:
+                env_file = Path(__file__).resolve().parent.parent / ".env"
+                if env_file.exists():
+                    load_dotenv(dotenv_path=env_file, override=False)
+                self.api_key = os.getenv("SARVAM_API_KEY", "").strip()
 
         if not self.api_key:
             raise SarvamTTSConfigurationError(
@@ -249,13 +277,13 @@ class SarvamTTSService:
 
         if is_hindi:
             spoken_text = clean_hindi_financial_text(raw_text)
-            default_voice = os.getenv("SARVAM_HINDI_VOICE", DEFAULT_SARVAM_HINDI_VOICE).strip().lower()
+            default_voice = os.getenv("SARVAM_MODULE1_HINDI_VOICE", DEFAULT_SARVAM_HINDI_VOICE).strip().lower()
         elif is_english:
             spoken_text = clean_english_financial_text(raw_text)
             default_voice = os.getenv("SARVAM_ENGLISH_VOICE", DEFAULT_SARVAM_ENGLISH_VOICE).strip().lower()
         else:
             spoken_text = clean_marathi_financial_text(raw_text)
-            default_voice = os.getenv("SARVAM_MARATHI_VOICE", DEFAULT_SARVAM_MARATHI_VOICE).strip().lower()
+            default_voice = os.getenv("SARVAM_MODULE1_MARATHI_VOICE", DEFAULT_SARVAM_MARATHI_VOICE).strip().lower()
 
         if not spoken_text:
             raise ValueError("Text contains no speakable characters.")

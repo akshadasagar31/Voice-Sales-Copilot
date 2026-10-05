@@ -1,0 +1,254 @@
+{
+  "active_models": {
+    "stt": "deepgram-nova-3",
+    "llm": "deepseek-chat",
+    "tts": "sarvam-bulbul-v3"
+  },
+  "models": [
+    {
+      "id": "deepgram-nova-3",
+      "name": "Deepgram Nova-3",
+      "category": "stt",
+      "provider": "Deepgram",
+      "model_id": "nova-3",
+      "description": "Multilingual low-latency STT (English, Hindi, Marathi with domain biasing)",
+      "is_builtin": true,
+      "is_active": true,
+      "configuration": {
+        "smart_format": true,
+        "punctuate": true,
+        "encoding": "linear16",
+        "sample_rate": 48000
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-02T11:12:40.718809+00:00"
+    },
+    {
+      "id": "deepgram-nova-2",
+      "name": "Deepgram Nova-2",
+      "category": "stt",
+      "provider": "Deepgram",
+      "model_id": "nova-2",
+      "description": "High-accuracy general English and multi-dialect STT",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "smart_format": true,
+        "punctuate": true,
+        "encoding": "linear16",
+        "sample_rate": 48000
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-02T11:12:40.718824+00:00"
+    },
+    {
+      "id": "sarvam-saaras-v4",
+      "name": "Sarvam Saaras v4",
+      "category": "stt",
+      "provider": "Sarvam AI",
+      "model_id": "saaras:v4",
+      "description": "Dedicated Indian regional language speech-to-text",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "language_code": "hi-IN",
+        "model": "saaras:v4"
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-02T11:12:40.718827+00:00"
+    },
+    {
+      "id": "sarvam-saaras-v2",
+      "name": "Sarvam Saaras v2",
+      "category": "stt",
+      "provider": "Sarvam AI",
+      "model_id": "saaras:v2",
+      "description": "Fast Indic speech recognition model",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "language_code": "hi-IN",
+        "model": "saaras:v2"
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-02T11:12:40.718829+00:00"
+    },
+    {
+      "id": "deepseek-chat",
+      "name": "DeepSeek Chat (V3)",
+      "category": "llm",
+      "provider": "OpenRouter",
+      "model_id": "deepseek/deepseek-chat",
+      "description": "Ultra-fast response generation & grounded RAG intelligence",
+      "is_builtin": true,
+      "is_active": true,
+      "configuration": {
+        "temperature": 0.1,
+        "max_tokens": 1024,
+        "top_p": 0.95
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-05T05:31:23.043635+00:00"
+    },
+    {
+      "id": "llama-3.3-70b",
+      "name": "Llama 3.3 70B Instruct",
+      "category": "llm",
+      "provider": "OpenRouter",
+      "model_id": "meta-llama/llama-3.3-70b-instruct",
+      "description": "Meta's flagship high-capability instruction model for sales objection handling",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "temperature": 0.15,
+        "max_tokens": 1200,
+        "top_p": 0.9
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-05T05:31:23.043673+00:00"
+    },
+    {
+      "id": "llama-3.1-8b",
+      "name": "Llama 3.1 8B Instruct",
+      "category": "llm",
+      "provider": "OpenRouter",
+      "model_id": "meta-llama/llama-3.1-8b-instruct",
+      "description": "Ultra-fast low-latency assistant model",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "temperature": 0.1,
+        "max_tokens": 800
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-05T05:31:23.043686+00:00"
+    },
+    {
+      "id": "deepseek-r1",
+      "name": "DeepSeek R1 (Reasoning)",
+      "category": "llm",
+      "provider": "OpenRouter",
+      "model_id": "deepseek/deepseek-r1",
+      "description": "Advanced reasoning model for complex financial & credit inquiries",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "temperature": 0.6,
+        "max_tokens": 2048
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-05T05:31:23.043696+00:00"
+    },
+    {
+      "id": "gpt-4o-mini",
+      "name": "OpenAI GPT-4o Mini",
+      "category": "llm",
+      "provider": "OpenRouter",
+      "model_id": "openai/gpt-4o-mini",
+      "description": "Fast and cost-effective multi-modal intelligence",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "temperature": 0.2,
+        "max_tokens": 1000
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-05T05:31:23.043705+00:00"
+    },
+    {
+      "id": "sarvam-bulbul-v2",
+      "name": "Sarvam Bulbul v2",
+      "category": "tts",
+      "provider": "Sarvam AI",
+      "model_id": "bulbul:v2",
+      "description": "Standard Indian language voice synthesis",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "default_speaker": "simran",
+        "pace": 1.0,
+        "sample_rate": 48000
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-02T05:09:50.230716+00:00"
+    },
+    {
+      "id": "deepgram-aura-asteria",
+      "name": "Deepgram Aura (Asteria)",
+      "category": "tts",
+      "provider": "Deepgram",
+      "model_id": "aura-asteria-en",
+      "description": "Natural conversational English female voice",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "voice": "aura-asteria-en",
+        "sample_rate": 48000
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-02T05:09:50.230718+00:00"
+    },
+    {
+      "id": "deepgram-aura-luna",
+      "name": "Deepgram Aura (Luna)",
+      "category": "tts",
+      "provider": "Deepgram",
+      "model_id": "aura-luna-en",
+      "description": "Warm and engaging conversational English voice",
+      "is_builtin": true,
+      "is_active": false,
+      "configuration": {
+        "voice": "aura-luna-en",
+        "sample_rate": 48000
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-10-02T05:09:50.230720+00:00"
+    },
+    {
+      "id": "custom-sarvam-ai-saaras-v3",
+      "name": "saaras:v3",
+      "category": "stt",
+      "provider": "Sarvam AI",
+      "model_id": "saaras:v3",
+      "api_key": "",
+      "description": "Custom STT model via Sarvam AI",
+      "is_builtin": false,
+      "is_active": false,
+      "configuration": {},
+      "created_at": "2026-09-28T08:23:08.774138+00:00",
+      "updated_at": "2026-10-02T11:12:40.718834+00:00"
+    },
+    {
+      "id": "custom-openrouter-groq",
+      "name": "Groq",
+      "category": "llm",
+      "provider": "OpenRouter",
+      "model_id": "Groq",
+      "api_key": "",
+      "description": "Custom LLM model via OpenRouter",
+      "is_builtin": false,
+      "is_active": false,
+      "configuration": {},
+      "created_at": "2026-10-02T09:49:55.039868+00:00",
+      "updated_at": "2026-10-05T05:31:23.043718+00:00"
+    },
+    {
+      "id": "sarvam-bulbul-v3",
+      "name": "Sarvam Bulbul v3",
+      "category": "tts",
+      "provider": "Sarvam AI",
+      "model_id": "bulbul:v3",
+      "description": "State-of-the-art natural Indian speech synthesis (Hindi, Marathi, English)",
+      "is_builtin": true,
+      "is_active": true,
+      "configuration": {
+        "default_speaker": "ritu",
+        "pace": 1.0,
+        "sample_rate": 48000
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "updated_at": "2026-10-05T05:59:45.575766+00:00"
+}

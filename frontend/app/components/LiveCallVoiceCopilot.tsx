@@ -48,8 +48,60 @@ import {
   Briefcase,
   Mail,
   FileSpreadsheet,
+  Globe,
+  ChevronDown,
+  User,
+  Bot,
 } from "lucide-react";
 import { SentenceTokenizer, SentenceAudioQueue } from "@/lib/sentenceStreamingTTS";
+
+// TypeScript interface defining runtime conversation messages
+export interface ConversationMessage {
+  id: string;
+  sender: "user" | "assistant";
+  text: string;
+  timestamp: string;
+  language?: string;
+}
+
+// Helper to determine accurate UI language indicator for messages
+function getMessageLanguage(text: string, fallbackLang?: string): string {
+  const hasDevanagari = /[\u0900-\u097F]/.test(text);
+  if (!hasDevanagari) return "EN";
+  if (/[ळऱ]/.test(text) || /\b(आहे|आहेत|नाही|नाहीत|पाहिजे|हवे|हवं|नमस्कार|किती|द्या|सांगा|होय|आणि)\b/.test(text)) {
+    return "MR";
+  }
+  if (/\b(है|हैं|नहीं|चाहिए|मुझे|नमस्ते|हाँ|बताएं|कितना|और|क्या)\b/.test(text)) {
+    return "HI";
+  }
+  if (fallbackLang && ["mr", "hi", "en"].includes(fallbackLang.toLowerCase())) {
+    return fallbackLang.toUpperCase();
+  }
+  return "HI";
+}
+
+// Crisp waveform icon matching reference UI (4 rounded vertical audio bars)
+function WaveformIcon({ className = "w-4 h-4 text-[#00897b]" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="currentColor">
+      <rect x="3" y="8" width="3" height="8" rx="1.5" />
+      <rect x="8.5" y="4" width="3" height="16" rx="1.5" />
+      <rect x="14" y="6" width="3" height="12" rx="1.5" />
+      <rect x="19.5" y="9" width="3" height="6" rx="1.5" />
+    </svg>
+  );
+}
+
+// 12-hour timestamp formatting helper (e.g. "2:34 PM")
+function formatMessageTime(): string {
+  const d = new Date();
+  let hours = d.getHours();
+  const minutes = d.getMinutes().toString().padStart(2, "0");
+  const ampm = hours >= 12 ? "PM" : "AM";
+  hours = hours % 12;
+  hours = hours ? hours : 12;
+  return `${hours}:${minutes} ${ampm}`;
+}
 
 // TypeScript interface defining the exact fields in a sales lead
 export interface ExtractedLead {
@@ -67,39 +119,58 @@ export interface ExtractedLead {
   updated_at?: string;
 }
 
+export interface PrimarySpeakerProfile {
+  dominantBin: number;
+  centroid: number;
+  formantRatio: number;
+  peakProminence: number;
+  sampleCount: number;
+  isCalibrated: boolean;
+}
+
+/**
+ * Computes normalized autocorrelation in the human vocal pitch range (85 Hz to 380 Hz)
+ * to measure Voicing Harmonicity. Near-field primary speech exhibits strong phase coherence
+ * (harmonicity >= 0.42), while diffuse background voices / reverberation exhibit degraded
+ * periodicity (harmonicity < 0.38).
+ */
+export function computeHarmonicity(chunk: Float32Array, sampleRate: number): number {
+  const minLag = Math.max(2, Math.floor(sampleRate / 380));
+  const maxLag = Math.min(Math.floor(chunk.length / 2), Math.ceil(sampleRate / 85));
+  if (maxLag <= minLag) return 0;
+
+  const nEval = chunk.length - maxLag;
+  let sumSq0 = 0;
+  for (let i = 0; i < nEval; i += 2) {
+    sumSq0 += chunk[i] * chunk[i];
+  }
+  const norm0 = Math.sqrt(sumSq0 * 2);
+  if (norm0 < 1e-4) return 0;
+
+  let bestCorr = 0;
+  const stride = sampleRate >= 44100 ? 3 : 2;
+  for (let lag = minLag; lag < maxLag; lag += stride) {
+    let dot = 0;
+    let sumSqLag = 0;
+    for (let i = 0; i < nEval; i += 2) {
+      const a = chunk[i];
+      const b = chunk[i + lag];
+      dot += a * b;
+      sumSqLag += b * b;
+    }
+    const normLag = Math.sqrt(sumSqLag * 2);
+    if (normLag > 1e-4) {
+      const corr = (dot * 2) / (norm0 * normLag);
+      if (corr > bestCorr) bestCorr = corr;
+    }
+  }
+  return Math.min(1.0, Math.max(0.0, bestCorr));
+}
 
 interface LiveCallVoiceCopilotProps {
   onAudioRecorded?: (blob: Blob) => void;
   onLeadSaved?: (lead: ExtractedLead) => void;
 }
-
-// Preset simulation scenarios for multi-turn testing in English, Hindi, and Marathi
-const SIMULATION_PRESETS = [
-  {
-    id: "turn1_en",
-    title: "Turn 1: Prospect Intro (English)",
-    lang: "EN",
-    text: "Had a great introductory call with Rajesh Kumar, Vice President of Technology at Acme Corporation. He is actively exploring enterprise financing options.",
-  },
-  {
-    id: "turn2_en",
-    title: "Turn 2: Loan Details (English - Updates Same Lead)",
-    lang: "EN",
-    text: "Rajesh confirmed Acme needs an Equipment Loan of 5000000 dollars over a 36-month term. His direct contact number is +91-9876543210.",
-  },
-  {
-    id: "hi_full",
-    title: "Complete Lead (हिंदी - Hindi)",
-    lang: "HI",
-    text: "नमस्ते, मैंने इंफोसिस के डायरेक्टर अमित वर्मा से बात की। उन्हें 25 लाख रुपये का बिजनेस लोन 24 महीने के लिए चाहिए। उनका फोन नंबर 9811223344 है।",
-  },
-  {
-    id: "mr_full",
-    title: "Complete Lead (मराठी - Marathi)",
-    lang: "MR",
-    text: "नमस्कार, मी टेक महिंद्राचे व्यवस्थापक राहुल पाटील यांच्याशी बोललो. त्यांना 30 लाख रुपयांचे व्यवसाय कर्ज 36 महिन्यांच्या कालावधीसाठी हवे आहे. त्यांचा फोन नंबर 9822334455 आहे.",
-  },
-];
 
 export type VoiceState = "idle" | "listening" | "processing" | "speaking";
 
@@ -166,10 +237,17 @@ function encodeWav(buffers: Float32Array[], sampleRate: number): Blob {
   return new Blob([view], { type: "audio/wav" });
 }
 
-export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: LiveCallVoiceCopilotProps) {
-  // Active sub-tab: "assistant" (continuous voice mode) or "simulation"
-  const [activeSubTab, setActiveSubTab] = useState<"assistant" | "simulation">("assistant");
+// Convert Float32Array PCM samples (-1.0 to 1.0) to 16-bit linear PCM ArrayBuffer for Deepgram WebSocket
+function convertFloat32ToInt16(chunk: Float32Array): ArrayBuffer {
+  const pcm16 = new Int16Array(chunk.length);
+  for (let i = 0; i < chunk.length; i++) {
+    const s = Math.max(-1, Math.min(1, chunk[i]));
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return pcm16.buffer;
+}
 
+export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: LiveCallVoiceCopilotProps) {
   // Voice Assistant state machine: "idle" | "listening" | "processing" | "speaking"
   const [voiceState, setVoiceState] = useState<"idle" | "listening" | "processing" | "speaking">("idle");
   const [processingStage, setProcessingStage] = useState<"transcribing" | "extracting" | "saving" | "speaking" | null>(null);
@@ -194,17 +272,62 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
   const [assistantResponseText, setAssistantResponseText] = useState<string | null>(null);
   const [isTTSPlaying, setIsTTSPlaying] = useState(false);
 
+  // Runtime Conversation messages (REAL speech & assistant responses only - empty initially)
+  const [conversationMessages, setConversationMessages] = useState<ConversationMessage[]>([]);
+  const [isLanguageMenuOpen, setIsLanguageMenuOpen] = useState(false);
+  const languageMenuRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const currentStreamMsgIdRef = useRef<string | null>(null);
+  const currentWsSentenceMsgIdRef = useRef<string | null>(null);
+
+  // Auto-scroll conversation to bottom on message update strictly within messages container
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (el) {
+      el.scrollTo({
+        top: el.scrollHeight,
+        behavior: "smooth",
+      });
+    }
+  }, [conversationMessages]);
+
+  // Close language dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (languageMenuRef.current && !languageMenuRef.current.contains(event.target as Node)) {
+        setIsLanguageMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
   // Concurrency & turn refs
   const turnIdRef = useRef<number>(0);
   const isContinuousModeRef = useRef<boolean>(false);
   const isVoicePipelineActiveRef = useRef<boolean>(false);
   const activeAbortControllerRef = useRef<AbortController | null>(null);
+  const handledFinalTurnsRef = useRef<Set<number>>(new Set());
+  const startListeningTurnRef = useRef<() => void>(() => {});
+  const isStartingSessionRef = useRef<boolean>(false);
+
+  // WebSocket live streaming STT refs
+  const sttSocketRef = useRef<WebSocket | null>(null);
+  const isWsStreamingRef = useRef<boolean>(false);
+  const wsPendingQueueRef = useRef<Float32Array[]>([]);
+  const hasWsFinalizedRef = useRef<boolean>(false);
+  const wasSpeakingRef = useRef<boolean>(false);
+  const activeTtsModelRef = useRef<string | null>(null);
+  const detectedLanguageRef = useRef<string>("en");
+  const isManualLanguageSelectionRef = useRef<boolean>(false);
 
   // Multi-Turn Lead Memory: tracks active PostgreSQL lead ID and fields across turns
   const activeLeadIdRef = useRef<number | null>(null);
   const currentLeadRef = useRef<ExtractedLead | null>(null);
 
   // Continuous Web Audio API & PCM capture refs (Guarantees unified AudioContext & pre-roll)
+  const isMicCaptureActiveRef = useRef<boolean>(true);
   const audioStreamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const resumePromiseRef = useRef<Promise<void> | null>(null);
@@ -212,9 +335,12 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
   const isStartingTurnRef = useRef<boolean>(false);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const audioWorkletNodeRef = useRef<AudioWorkletNode | null>(null);
+  const workletLoadedContextsRef = useRef<WeakSet<AudioContext>>(new WeakSet());
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const silentGainRef = useRef<GainNode | null>(null);
   const filterNodesRef = useRef<BiquadFilterNode[]>([]);
+  const sttFinalPerfTimestampRef = useRef<number>(0);
 
   // Pre-roll PCM buffers (~850ms rolling window)
   const preRollBuffersRef = useRef<Float32Array[]>([]);
@@ -225,9 +351,23 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
   const consecutiveBargeInFramesRef = useRef<number>(0);
   const speakerBleedBaselineRef = useRef<number>(18);
   const bleedRmsRef = useRef<number>(0.012);
+  const speakerBleedDbRef = useRef<number>(-45.0);
   const ambientNoiseFloorRef = useRef<number>(0.006);
+  const ambientNoiseFloorDbRef = useRef<number>(-50.0);
+  const primarySpeakerProfileRef = useRef<PrimarySpeakerProfile>({
+    dominantBin: 5,
+    centroid: 6.0,
+    formantRatio: 1.5,
+    peakProminence: 2.0,
+    sampleCount: 0,
+    isCalibrated: false,
+  });
   const sentenceStartTimestampRef = useRef<number>(0);
   const speechEndTimestampRef = useRef<number>(0);
+  const llmStartTimestampRef = useRef<number>(0);
+  const firstSentenceTimestampRef = useRef<number>(0);
+  const ttsStartTimestampRef = useRef<number>(0);
+  const hasFirstAudioPlayedRef = useRef<boolean>(false);
 
   const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
   const autoListenTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -244,7 +384,7 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
 
   // Check if a turn has been superseded by a newer one or canceled
   const isTurnStale = useCallback((turnId: number) => {
-    return turnId !== turnIdRef.current || !isContinuousModeRef.current;
+    return turnId !== turnIdRef.current;
   }, []);
 
   // Stop any active TTS audio playback safely and abort pending queue
@@ -263,6 +403,8 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
     setIsTTSPlaying(false);
   }, []);
 
+  const startStreamingSTTRef = useRef<((buffers: Float32Array[]) => void) | null>(null);
+
   // Cancel any active turn and abort pending HTTP requests
   const cancelActiveTurn = useCallback(() => {
     turnIdRef.current += 1;
@@ -270,6 +412,15 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
       activeAbortControllerRef.current.abort();
       activeAbortControllerRef.current = null;
     }
+    if (!isContinuousModeRef.current && sttSocketRef.current) {
+      try {
+        sttSocketRef.current.close();
+      } catch (_) {}
+      sttSocketRef.current = null;
+    }
+    isWsStreamingRef.current = false;
+    hasWsFinalizedRef.current = false;
+    wsPendingQueueRef.current = [];
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
@@ -278,6 +429,12 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
       clearTimeout(autoListenTimeoutRef.current);
       autoListenTimeoutRef.current = null;
     }
+    speechEndTimestampRef.current = 0;
+    llmStartTimestampRef.current = 0;
+    firstSentenceTimestampRef.current = 0;
+    ttsStartTimestampRef.current = 0;
+    hasFirstAudioPlayedRef.current = false;
+    wasSpeakingRef.current = false;
     stopAllAudioPlayback();
     isVoicePipelineActiveRef.current = false;
   }, [stopAllAudioPlayback]);
@@ -304,6 +461,7 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
     // 1. Cut off active turn and stop playing audio immediately
     cancelActiveTurn();
     stopAllAudioPlayback();
+    hasFirstAudioPlayedRef.current = false;
 
     // 2. Keep continuous voice mode active and switch immediately to listening
     isContinuousModeRef.current = true;
@@ -320,6 +478,9 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
+
+    // 4. Immediately begin streaming STT over WebSocket for newly captured speech
+    startStreamingSTTRef.current?.([...preRollBuffersRef.current]);
   }, [cancelActiveTurn, stopAllAudioPlayback]);
 
   // Clean up on component unmount
@@ -329,12 +490,20 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       if (autoListenTimeoutRef.current) clearTimeout(autoListenTimeoutRef.current);
+      if (audioWorkletNodeRef.current) {
+        try {
+          audioWorkletNodeRef.current.port.onmessage = null;
+          audioWorkletNodeRef.current.disconnect();
+        } catch (_) {}
+        audioWorkletNodeRef.current = null;
+      }
       if (scriptProcessorRef.current) {
         try {
           scriptProcessorRef.current.disconnect();
         } catch (_) {}
         scriptProcessorRef.current = null;
       }
+
       if (silentGainRef.current) {
         try {
           silentGainRef.current.disconnect();
@@ -567,84 +736,52 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
   };
 
   // --------------------------------------------------------------------------
-  // Core Continuous Voice Pipeline: STT -> DeepSeek Stream -> DB CRM Update -> Sentence TTS -> Auto-Listen
+  // HANDLER: handleFinalSTTResponse
   // --------------------------------------------------------------------------
-  const processSpeechTurn = async (blob: Blob, turnId: number) => {
-    if (isTurnStale(turnId)) return;
-
-    isVoicePipelineActiveRef.current = true;
-    setVoiceState("processing");
-    voiceStateRef.current = "processing";
-    setProcessingStage("transcribing");
-    setErrorMessage(null);
-
-    const abortController = new AbortController();
-    activeAbortControllerRef.current = abortController;
-
-    try {
-      // Step 1: Deepgram STT transcription with retry
-      const filename = `turn_${turnId}_${Date.now()}.wav`;
-      const formData = new FormData();
-
-      if (typeof File !== "undefined") {
-        const audioFile = new File([blob], filename, { type: "audio/wav" });
-        formData.append("file", audioFile);
-      } else {
-        formData.append("file", blob, filename);
+  // • WHAT IT DOES: Unpacks final STT transcript and metadata from Deepgram Nova-3,
+  //   updates lead memory and PostgreSQL CRM, and starts sentence-level streaming TTS.
+  // • FAST-PATH (< 1s latency): If deterministic sentence 1 prompt is present,
+  //   enqueues immediately into SentenceAudioQueue for Sarvam Bulbul v3 TTS.
+  // --------------------------------------------------------------------------
+  const handleFinalSTTResponse = useCallback(
+    async (sttData: any, turnId: number, abortController: AbortController) => {
+      if (isTurnStale(turnId)) return;
+      if (handledFinalTurnsRef.current.has(turnId)) {
+        console.log(`[VoiceCopilot] Turn #${turnId} already handled. Skipping duplicate final STT.`);
+        return;
       }
+      handledFinalTurnsRef.current.add(turnId);
 
-      formData.append("language", selectedLanguage === "auto" ? "multi" : selectedLanguage);
-      formData.append("module", "module1");
-      if (currentLeadRef.current) {
-        formData.append("existing_lead", JSON.stringify(currentLeadRef.current));
-      }
-      if (activeLeadIdRef.current) {
-        formData.append("lead_id", String(activeLeadIdRef.current));
-      }
-
-      console.log(`[VoiceCopilot] Sending Turn #${turnId} (${blob.size} bytes WAV) to /api/voice-entry...`);
-      let sttRes: Response | null = null;
-
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        if (isTurnStale(turnId)) return;
-        try {
-          sttRes = await fetch("/api/voice-entry", {
-            method: "POST",
-            body: formData,
-            signal: abortController.signal,
-          });
-          if ((sttRes.status === 503 || sttRes.status === 408 || sttRes.status === 502) && attempt < 2) {
-            await new Promise((resolve) => setTimeout(resolve, 600));
-            continue;
+      const rawTranscript = (sttData.transcript || "").trim();
+      let detectedLang = (sttData.detected_language || "").toLowerCase().split("-")[0];
+      if (isManualLanguageSelectionRef.current && selectedLanguage !== "auto") {
+        detectedLang = selectedLanguage;
+      } else if (!["en", "hi", "mr"].includes(detectedLang)) {
+        if (/[\u0900-\u097F]/.test(rawTranscript)) {
+          if (/\b(आहे|किती|मला|पाहिजे|हवे|काय|कसे|नाही|दरमहा|वर्षांसाठी|मुदत)\b/.test(rawTranscript)) {
+            detectedLang = "mr";
+          } else {
+            detectedLang = "hi";
           }
-          break;
-        } catch (fetchErr: any) {
-          if (fetchErr?.name === "AbortError" || isTurnStale(turnId)) return;
-          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 600));
+        } else {
+          detectedLang = "en";
         }
       }
 
-      if (!sttRes || !sttRes.ok) {
-        const errJson = (await sttRes?.json().catch(() => ({}))) || {};
-        throw new Error(errJson.error || errJson.detail || "Deepgram STT transcription failed.");
+      const respLang = (sttData.language || detectedLang).toLowerCase().split("-")[0];
+
+      // Update the language badge strictly from the CURRENT user turn audio (sttData.detected_language)
+      // Never inherit from the assistant's previous language or response language
+      const turnAudioLang = ["mr", "hi", "en"].includes(detectedLang) ? detectedLang : "en";
+      setDetectedLanguage(turnAudioLang);
+      detectedLanguageRef.current = turnAudioLang;
+      // In auto mode, NEVER overwrite selectedLanguage with the assistant's response language.
+      // selectedLanguage remains "auto" so the next turn detects fresh from the user's audio.
+      if (isManualLanguageSelectionRef.current && selectedLanguage !== "auto") {
+        // User explicitly locked language; preserve manual choice
+      } else {
+        setSelectedLanguage("auto");
       }
-
-      // STEP 1: UNPACK DEEPGRAM TRANSCRIPT
-      // Deepgram returns the transcribed text and detected language (en, hi, or mr).
-      const sttData = await sttRes.json();
-      if (isTurnStale(turnId)) return;
-
-      const rawTranscript = (sttData.transcript || "").trim();
-      const rawDetected = (
-        sttData.detected_language || (selectedLanguage !== "auto" ? selectedLanguage : "en")
-      ).toLowerCase();
-      let detectedLang = rawDetected.split("-")[0];
-      if (!["en", "hi", "mr", "mixed"].includes(detectedLang)) {
-        detectedLang = "en";
-      }
-
-      setDetectedLanguage(detectedLang);
-      const respLang = (sttData.language || (detectedLang === "mixed" ? "en" : detectedLang)).toLowerCase();
 
       // Check if backend reset/new lead occurred
       if (sttData.is_new_lead) {
@@ -655,7 +792,7 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
         setSaveLeadSuccess(null);
       }
 
-      // If Deepgram / Sarvam heard only background noise and no actual words:
+      // If Deepgram heard only background noise and no actual words:
       if (!rawTranscript) {
         console.log(`[VoiceCopilot] Turn #${turnId}: No clear speech detected. Auto-rearming listening...`);
         isVoicePipelineActiveRef.current = false;
@@ -680,9 +817,20 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
       setSessionTurnCount((prev) => prev + 1);
       console.log(`[VoiceCopilot] Turn #${turnId} Transcript (${detectedLang}): "${rawTranscript}"`);
 
-      // STEP 2: SETUP SENTENCE-STREAMING AUDIO QUEUE
-      // We initialize an Audio player and SentenceAudioQueue that will fetch
-      // Deepgram TTS for sentences in parallel and play them sequentially.
+      // Add REAL runtime user speech message to conversation panel
+      const userMsgId = `user-${turnId}-${Date.now()}`;
+      const userTimestamp = formatMessageTime();
+      setConversationMessages((prev) => [
+        ...prev,
+        {
+          id: userMsgId,
+          sender: "user",
+          text: rawTranscript,
+          timestamp: userTimestamp,
+        },
+      ]);
+
+      // STEP 2: SETUP SENTENCE-STREAMING AUDIO QUEUE WITH SARVAM FEMALE VOICE
       if (!ttsAudioRef.current && typeof window !== "undefined") {
         ttsAudioRef.current = new Audio();
       }
@@ -690,95 +838,192 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
       if (audioPlayer && !sentenceAudioQueueRef.current) {
         sentenceAudioQueueRef.current = new SentenceAudioQueue(audioPlayer, {}, audioContextRef.current, {
           module: "module1",
-          speaker: "simran",
+          model: activeTtsModelRef.current || undefined,
         });
       }
       if (sentenceAudioQueueRef.current) {
-        sentenceAudioQueueRef.current.setOptions({ module: "module1", speaker: "simran" });
+        sentenceAudioQueueRef.current.setOptions({
+          module: "module1",
+          model: activeTtsModelRef.current || undefined,
+        });
         if (audioContextRef.current) {
           sentenceAudioQueueRef.current.setAudioContext(audioContextRef.current);
         }
       }
 
       sentenceAudioQueueRef.current?.updateCallbacks({
-        onSentenceStart: () => {
+        onSentenceStart: (text: string, index: number) => {
           if (isTurnStale(turnId)) return;
-          sentenceStartTimestampRef.current = Date.now();
-          const speechEnd = speechEndTimestampRef.current || (sentenceStartTimestampRef.current - 450);
-          const totalLatency = sentenceStartTimestampRef.current - speechEnd;
-          console.log(`%c[VoiceCopilot:Latency] >>> FIRST AUDIO RESPONSE PLAYING: ${totalLatency}ms after speech ended! <<<`, "color: #10b981; font-weight: bold; font-size: 14px;");
+          if (!hasFirstAudioPlayedRef.current) {
+            hasFirstAudioPlayedRef.current = true;
+            sentenceStartTimestampRef.current = Date.now();
+            const tFirstAudio = performance.now();
+            const speechEnd = speechEndTimestampRef.current || (sentenceStartTimestampRef.current - 450);
+            const totalSpeechToAudio = sentenceStartTimestampRef.current - speechEnd;
+            const finalSttToAudio = sttFinalPerfTimestampRef.current > 0
+              ? tFirstAudio - sttFinalPerfTimestampRef.current
+              : 0;
+            const ttsToAudio = ttsStartTimestampRef.current > 0
+              ? tFirstAudio - ttsStartTimestampRef.current
+              : 0;
+            const llmFirstSentence = (firstSentenceTimestampRef.current > 0 && llmStartTimestampRef.current > 0)
+              ? firstSentenceTimestampRef.current - llmStartTimestampRef.current
+              : 0;
+
+            console.log(`[LATENCY] 5. FIRST-AUDIO-PLAYBACK at perf=${tFirstAudio.toFixed(3)}ms (+${ttsToAudio.toFixed(1)}ms from TTS request)`);
+            console.log(
+              `%c[VoiceCopilot:Latency] >>> FINAL-STT -> FIRST-AUDIO: ${finalSttToAudio.toFixed(1)}ms (Target: 300-600ms) | Total Speech-to-Audio: ${totalSpeechToAudio}ms <<<`,
+              "color: #10b981; font-weight: bold; font-size: 14px;"
+            );
+            console.log(
+              `[LATENCY] Breakdown: LLM-First-Sentence: ${llmFirstSentence.toFixed(1)}ms | TTS-To-Audio: ${ttsToAudio.toFixed(1)}ms | Final-STT-To-Audio: ${finalSttToAudio.toFixed(1)}ms`
+            );
+          } else {
+            console.log(`[LATENCY] Sentence #${index} playback started (+${(performance.now() - (sttFinalPerfTimestampRef.current || 0)).toFixed(1)}ms from STT): "${(text || '').slice(0, 40)}..."`);
+          }
           setVoiceState("speaking");
           voiceStateRef.current = "speaking";
           setProcessingStage("speaking");
           setIsTTSPlaying(true);
         },
         onQueueComplete: () => {
-          // STEP 3: AUTO-LISTEN AFTER SPEAKING COMPLETES
-          // As soon as the copilot finishes speaking the response, it automatically
-          // re-arms the microphone so the user can speak again without clicking any buttons!
-          console.log(`[VoiceCopilot] Voice response finished for Turn #${turnId}. Auto-listening...`);
+          console.log(`[VoiceCopilot] Voice response finished for Turn #${turnId}.`);
           setIsTTSPlaying(false);
           isVoicePipelineActiveRef.current = false;
+          speechEndTimestampRef.current = 0;
+          wasSpeakingRef.current = false;
+          setProcessingStage(null);
 
-          // Automatically resume continuous listening for next prospect speech turn
+          isSpeechTurnActiveRef.current = false;
+          speechDetectedRef.current = false;
+          recordedBuffersRef.current = [];
+          preRollBuffersRef.current = [];
+          consecutiveSpeechFramesRef.current = 0;
+          consecutiveBargeInFramesRef.current = 0;
+
           if (isContinuousModeRef.current) {
+            console.log(`[VoiceCopilot] Continuous mode active. Returning to Listening for Turn #${turnId + 1}.`);
             setVoiceState("listening");
             voiceStateRef.current = "listening";
-            setProcessingStage(null);
-
-            isSpeechTurnActiveRef.current = false;
-            speechDetectedRef.current = false;
-            recordedBuffersRef.current = [];
-            preRollBuffersRef.current = [];
-            consecutiveSpeechFramesRef.current = 0;
-            consecutiveBargeInFramesRef.current = 0;
-
             if (autoListenTimeoutRef.current) clearTimeout(autoListenTimeoutRef.current);
             autoListenTimeoutRef.current = setTimeout(() => {
-              if (isContinuousModeRef.current && !isVoicePipelineActiveRef.current) {
-                startListeningTurn();
+              if (isContinuousModeRef.current && voiceStateRef.current === "listening") {
+                startListeningTurnRef.current();
               }
-            }, 100);
+            }, 250);
           } else {
+            console.log(`[VoiceCopilot] Session ended. Returning to Tap to Speak.`);
             setVoiceState("idle");
             voiceStateRef.current = "idle";
-            setProcessingStage(null);
+            if (audioStreamRef.current) {
+              try {
+                audioStreamRef.current.getTracks().forEach((track) => track.stop());
+              } catch (_) {}
+              audioStreamRef.current = null;
+            }
           }
         },
         onError: (e) => {
           console.warn("[VoiceCopilot] Audio playback error:", e);
           setIsTTSPlaying(false);
           isVoicePipelineActiveRef.current = false;
+          speechEndTimestampRef.current = 0;
+          wasSpeakingRef.current = false;
+          setProcessingStage(null);
 
           if (isContinuousModeRef.current) {
             setVoiceState("listening");
             voiceStateRef.current = "listening";
-            setProcessingStage(null);
-            startListeningTurn();
+            if (autoListenTimeoutRef.current) clearTimeout(autoListenTimeoutRef.current);
+            autoListenTimeoutRef.current = setTimeout(() => {
+              if (isContinuousModeRef.current && voiceStateRef.current === "listening") {
+                startListeningTurnRef.current();
+              }
+            }, 250);
           } else {
             setVoiceState("idle");
             voiceStateRef.current = "idle";
-            setProcessingStage(null);
+            if (audioStreamRef.current) {
+              try {
+                audioStreamRef.current.getTracks().forEach((track) => track.stop());
+              } catch (_) {}
+              audioStreamRef.current = null;
+            }
           }
         },
       });
 
       sentenceAudioQueueRef.current?.startNewTurn(turnId);
+      hasFirstAudioPlayedRef.current = false;
       const tokenizer = new SentenceTokenizer();
 
-      // FAST-PATH: INSTANT DETERMINISTIC FIRST RESPONSE (< 500ms speech-to-audio)
-      // Uses deterministic lead state from /api/voice-entry to start Sarvam Bulbul v3 TTS immediately
-      // for Sentence 1 without waiting for full LLM / DB processing.
-      const immediateSentence = sttData.immediate_sentence1 || (sttData.is_greeting ? (sttData.greeting_response || getNaturalGreeting(respLang)) : (sttData.is_assistant_query ? (sttData.assistant_response || getAssistantAnswerFallback(rawTranscript, respLang)) : null));
+      const tLlmStart = performance.now();
+      llmStartTimestampRef.current = tLlmStart;
+      console.log(`[LATENCY] 2. LLM request start at perf=${tLlmStart.toFixed(3)}ms`);
+
+      // FAST-PATH: INSTANT DETERMINISTIC FIRST RESPONSE (< 1s speech-to-audio)
+      const immediateSentence =
+        sttData.immediate_sentence1 ||
+        (sttData.is_greeting
+          ? sttData.greeting_response || getNaturalGreeting(respLang)
+          : (sttData.is_assistant_query && !sttData.has_subsequent_sentences)
+          ? sttData.assistant_response || (sttData.is_general_query ? null : getAssistantAnswerFallback(rawTranscript, respLang))
+          : null);
+
       if (immediateSentence) {
-        console.log(`[VoiceCopilot:Speed] Starting immediate Sarvam TTS for sentence 1: "${immediateSentence}"`);
+        console.log(`[VoiceCopilot:Speed] Starting immediate TTS for sentence 1: "${immediateSentence}"`);
         setAssistantResponseText(immediateSentence);
-        if (sttData.lead && !sttData.is_assistant_query) {
+
+        // Add REAL assistant response to conversation panel
+        const asstMsgId = `asst-${turnId}-${Date.now()}`;
+        const asstTime = formatMessageTime();
+        setConversationMessages((prev) => [
+          ...prev,
+          {
+            id: asstMsgId,
+            sender: "assistant",
+            text: immediateSentence,
+            timestamp: asstTime,
+          },
+        ]);
+
+        setVoiceState("speaking");
+        voiceStateRef.current = "speaking";
+        setProcessingStage("speaking");
+        setIsTTSPlaying(true);
+
+        // ENQUEUE FIRST SENTENCE TO TTS IMMEDIATELY (before lead state updates)
+        const sentences = tokenizer.feed(immediateSentence);
+        const trailing = tokenizer.flush();
+        if (trailing) sentences.push(trailing);
+        if (sentences.length === 0 && immediateSentence.trim()) sentences.push(immediateSentence.trim());
+
+        const tFirstSentence = performance.now();
+        firstSentenceTimestampRef.current = tFirstSentence;
+        const llmDur = tFirstSentence - tLlmStart;
+        console.log(`[LATENCY] 3. first LLM sentence ready at perf=${tFirstSentence.toFixed(3)}ms (+${llmDur.toFixed(1)}ms) sentences=${sentences.length}`);
+
+        const tTtsStart = performance.now();
+        ttsStartTimestampRef.current = tTtsStart;
+        console.log(`[LATENCY] 4. TTS request start at perf=${tTtsStart.toFixed(3)}ms sentence="${(sentences[0] || '').slice(0, 50)}"`);
+
+        for (const s of sentences) {
+          sentenceAudioQueueRef.current?.enqueueSentence(s, respLang);
+        }
+        if (!sttData.has_subsequent_sentences) {
+          sentenceAudioQueueRef.current?.markStreamComplete();
+        }
+
+        const latencyToTts = Date.now() - (speechEndTimestampRef.current || Date.now());
+        console.log(`[VoiceCopilot:Latency] Speech End -> Sentence 1 Enqueued for TTS: ${latencyToTts}ms`);
+
+        // Lead state updates happen AFTER TTS enqueue to avoid blocking the fast-path
+        if (sttData.lead && !sttData.is_assistant_query && !sttData.is_general_query) {
           currentLeadRef.current = sttData.lead;
           setExtractedLead(sttData.lead);
           if (onLeadSaved) onLeadSaved(sttData.lead);
         }
-        if (sttData.lead_id && !sttData.is_assistant_query) {
+        if (sttData.lead_id && !sttData.is_assistant_query && !sttData.is_general_query) {
           activeLeadIdRef.current = sttData.lead_id;
           setSaveLeadSuccess({
             id: sttData.lead_id,
@@ -786,35 +1031,56 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
             isUpdate: true,
           });
         }
+        return;
+      }
 
+      if (!immediateSentence && sttData.has_subsequent_sentences) {
+        // Asynchronous WebSocket streaming mode: subsequent sentences arrive via type="sentence"
         setVoiceState("speaking");
         voiceStateRef.current = "speaking";
         setProcessingStage("speaking");
         setIsTTSPlaying(true);
-
-        const sentences = tokenizer.feed(immediateSentence);
-        const trailing = tokenizer.flush();
-        if (trailing) sentences.push(trailing);
-        if (sentences.length === 0 && immediateSentence.trim()) sentences.push(immediateSentence.trim());
-
-        for (const s of sentences) {
-          sentenceAudioQueueRef.current?.enqueueSentence(s, respLang);
-        }
-        sentenceAudioQueueRef.current?.markStreamComplete();
-
-        const latencyToTts = Date.now() - (speechEndTimestampRef.current || Date.now());
-        console.log(`[VoiceCopilot:Latency] Speech End -> Sentence 1 Enqueued for TTS: ${latencyToTts}ms`);
         return;
       }
 
-      // ASSISTANT-CONVERSATION HANDLING (Fallback):
-      // Questions like "What is your name?", "Who are you?", and "What can you do?"
-      // get natural assistant answers without modifying lead data or asking lead fields.
-      const isAssistantQueryTurn = Boolean(sttData.is_assistant_query || isAssistantQueryText(rawTranscript));
+      // ASSISTANT-CONVERSATION HANDLING (Fallback)
+      const isAssistantQueryTurn = Boolean(sttData.is_assistant_query || (!sttData.is_general_query && isAssistantQueryText(rawTranscript)));
       if (isAssistantQueryTurn) {
-        console.log(`[VoiceCopilot] Turn #${turnId} identified as assistant-conversation query ("${rawTranscript}").`);
-        const assistantSpoken = sttData.assistant_response || sttData.immediate_sentence1 || getAssistantAnswerFallback(rawTranscript, respLang);
+        if (sttData.is_general_query && sttData.has_subsequent_sentences) {
+          setVoiceState("speaking");
+          voiceStateRef.current = "speaking";
+          setProcessingStage("speaking");
+          setIsTTSPlaying(true);
+          return;
+        }
+
+        const assistantSpoken =
+          sttData.assistant_response ||
+          sttData.immediate_sentence1 ||
+          (sttData.is_general_query ? "" : getAssistantAnswerFallback(rawTranscript, respLang));
+
+        if (!assistantSpoken) {
+          if (sttData.llm_unavailable) {
+            console.warn("[VoiceCopilot] LLM unavailable for general query; returning to listening");
+          }
+          return;
+        }
+
         setAssistantResponseText(assistantSpoken);
+
+        // Add REAL assistant response to conversation panel
+        const asstMsgId = `asst-${turnId}-${Date.now()}`;
+        const asstTime = formatMessageTime();
+        setConversationMessages((prev) => [
+          ...prev,
+          {
+            id: asstMsgId,
+            sender: "assistant",
+            text: assistantSpoken,
+            timestamp: asstTime,
+          },
+        ]);
+
         setVoiceState("speaking");
         voiceStateRef.current = "speaking";
         setProcessingStage("speaking");
@@ -832,14 +1098,25 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
         return;
       }
 
-      // GREETING-ONLY HANDLING (Fallback):
-      // When the user says only a greeting ("Hello", "Hi", "नमस्ते", "नमस्कार"),
-      // respond naturally without modifying PostgreSQL CRM data and automatically resume listening.
+      // GREETING-ONLY HANDLING (Fallback)
       const isGreetingTurn = Boolean(sttData.is_greeting || isGreetingOnly(rawTranscript));
       if (isGreetingTurn) {
-        console.log(`[VoiceCopilot] Turn #${turnId} identified as greeting-only ("${rawTranscript}").`);
         const greetingSpoken = sttData.greeting_response || getNaturalGreeting(respLang);
         setAssistantResponseText(greetingSpoken);
+
+        // Add REAL assistant greeting to conversation panel
+        const asstMsgId = `asst-${turnId}-${Date.now()}`;
+        const asstTime = formatMessageTime();
+        setConversationMessages((prev) => [
+          ...prev,
+          {
+            id: asstMsgId,
+            sender: "assistant",
+            text: greetingSpoken,
+            timestamp: asstTime,
+          },
+        ]);
+
         setVoiceState("speaking");
         voiceStateRef.current = "speaking";
         setProcessingStage("speaking");
@@ -860,19 +1137,40 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
       // Step 2 & 3 & 4: DeepSeek Streaming AI Lead Extraction, PostgreSQL CRM Update & Sentence-Level TTS
       setProcessingStage("extracting");
       setAssistantResponseText("");
+      const streamTurnMsgId = `asst-stream-${turnId}-${Date.now()}`;
+      currentStreamMsgIdRef.current = streamTurnMsgId;
 
-      const extractRes = await fetch("/api/extract-lead", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: abortController.signal,
-        body: JSON.stringify({
-          transcript: rawTranscript,
-          existing_lead: currentLeadRef.current || undefined,
-          language: respLang,
-          stream: true,
-          lead_id: activeLeadIdRef.current || undefined,
-        }),
-      });
+      const fastApiBase = process.env.NEXT_PUBLIC_FASTAPI_URL || "http://127.0.0.1:8001";
+      const extractUrl = `${fastApiBase.replace(/\/+$/, "")}/api/extract-lead`;
+      let extractRes: Response;
+      try {
+        extractRes = await fetch(extractUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: abortController.signal,
+          body: JSON.stringify({
+            transcript: rawTranscript,
+            existing_lead: currentLeadRef.current || undefined,
+            language: respLang,
+            stream: true,
+            lead_id: activeLeadIdRef.current || undefined,
+          }),
+        });
+      } catch (directErr) {
+        if (abortController.signal.aborted) throw directErr;
+        extractRes = await fetch("/api/extract-lead", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: abortController.signal,
+          body: JSON.stringify({
+            transcript: rawTranscript,
+            existing_lead: currentLeadRef.current || undefined,
+            language: respLang,
+            stream: true,
+            lead_id: activeLeadIdRef.current || undefined,
+          }),
+        });
+      }
 
       if (isTurnStale(turnId)) return;
 
@@ -923,9 +1221,8 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
             const token = parsed.token ?? "";
             if (token) {
               accumulatedSpoken += token;
-              setAssistantResponseText(accumulatedSpoken);
 
-              // Feed token to sentence tokenizer to immediately yield completed sentences
+              // ENQUEUE TO TTS BEFORE React state update to minimize latency
               const completedSentences = tokenizer.feed(token);
               for (const s of completedSentences) {
                 const cleaned = cleanTextForSpeech(s);
@@ -933,6 +1230,24 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
                   sentenceAudioQueueRef.current?.enqueueSentence(cleaned, respLang);
                 }
               }
+
+              // Update UI state AFTER TTS enqueue (non-blocking for audio pipeline)
+              setAssistantResponseText(accumulatedSpoken);
+              setConversationMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (last && last.id === streamTurnMsgId) {
+                  return [...prev.slice(0, -1), { ...last, text: accumulatedSpoken }];
+                }
+                return [
+                  ...prev,
+                  {
+                    id: streamTurnMsgId,
+                    sender: "assistant",
+                    text: accumulatedSpoken,
+                    timestamp: formatMessageTime(),
+                  },
+                ];
+              });
             }
           } else if (event === "done") {
             if (parsed.is_new_lead && !currentLeadRef.current) {
@@ -943,6 +1258,21 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
             if (parsed.answer && !accumulatedSpoken) {
               accumulatedSpoken = parsed.answer;
               setAssistantResponseText(accumulatedSpoken);
+              setConversationMessages((prev) => {
+                const last = prev[prev.length - 1];
+                if (last && last.id === streamTurnMsgId) {
+                  return [...prev.slice(0, -1), { ...last, text: accumulatedSpoken }];
+                }
+                return [
+                  ...prev,
+                  {
+                    id: streamTurnMsgId,
+                    sender: "assistant",
+                    text: accumulatedSpoken,
+                    timestamp: formatMessageTime(),
+                  },
+                ];
+              });
             }
             const trailing = tokenizer.flush();
             if (trailing) {
@@ -1007,7 +1337,6 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
         throw streamErr;
       }
 
-      // Flush any remaining tokens into sentence audio queue
       const finalTrailing = tokenizer.flush();
       if (finalTrailing) {
         const cleaned = cleanTextForSpeech(finalTrailing);
@@ -1016,10 +1345,81 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
         }
       }
       sentenceAudioQueueRef.current?.markStreamComplete();
-    } catch (err: any) {
-      if (err?.name === "AbortError" || isTurnStale(turnId)) {
-        return;
+    },
+    [cleanTextForSpeech, getAssistantAnswerFallback, getNaturalGreeting, isAssistantQueryText, isGreetingOnly, isTurnStale, onLeadSaved, selectedLanguage]
+  );
+
+  // --------------------------------------------------------------------------
+  // Core Continuous Voice Pipeline: HTTP Fallback STT -> handleFinalSTTResponse
+  // --------------------------------------------------------------------------
+  const processSpeechTurn = async (blob: Blob, turnId: number) => {
+    if (isTurnStale(turnId)) return;
+
+    isVoicePipelineActiveRef.current = true;
+    setVoiceState("processing");
+    voiceStateRef.current = "processing";
+    setProcessingStage("transcribing");
+    setErrorMessage(null);
+
+    const abortController = new AbortController();
+    activeAbortControllerRef.current = abortController;
+
+    try {
+      const filename = `turn_${turnId}_${Date.now()}.wav`;
+      const formData = new FormData();
+
+      if (typeof File !== "undefined") {
+        const audioFile = new File([blob], filename, { type: "audio/wav" });
+        formData.append("file", audioFile);
+      } else {
+        formData.append("file", blob, filename);
       }
+
+      if (isManualLanguageSelectionRef.current && selectedLanguage !== "auto") {
+        formData.append("language", selectedLanguage);
+      } else {
+        formData.append("language", "auto");
+      }
+      formData.append("module", "module1");
+      if (currentLeadRef.current) {
+        formData.append("existing_lead", JSON.stringify(currentLeadRef.current));
+      }
+      if (activeLeadIdRef.current) {
+        formData.append("lead_id", String(activeLeadIdRef.current));
+      }
+
+      console.log(`[VoiceCopilot] Sending Turn #${turnId} (${blob.size} bytes WAV) to /api/voice-entry...`);
+      let sttRes: Response | null = null;
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        if (isTurnStale(turnId)) return;
+        try {
+          sttRes = await fetch("/api/voice-entry", {
+            method: "POST",
+            body: formData,
+            signal: abortController.signal,
+          });
+          if ((sttRes.status === 503 || sttRes.status === 408 || sttRes.status === 502) && attempt < 2) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            continue;
+          }
+          break;
+        } catch (fetchErr: any) {
+          if (fetchErr?.name === "AbortError" || isTurnStale(turnId)) return;
+          if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+
+      if (!sttRes || !sttRes.ok) {
+        const errJson = (await sttRes?.json().catch(() => ({}))) || {};
+        throw new Error(errJson.error || errJson.detail || "Deepgram STT transcription failed.");
+      }
+
+      const sttData = await sttRes.json();
+      sttFinalPerfTimestampRef.current = performance.now();
+      await handleFinalSTTResponse(sttData, turnId, abortController);
+    } catch (err: any) {
+      if (err?.name === "AbortError" || isTurnStale(turnId)) return;
       console.error(`[VoiceCopilot] Error in Turn #${turnId}:`, err);
       setErrorMessage(err?.message || "Failed to process voice note.");
       isVoicePipelineActiveRef.current = false;
@@ -1038,68 +1438,401 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
   };
 
   // --------------------------------------------------------------------------
+  // LIVE STREAMING STT: Stream PCM to Deepgram Nova-3 over WebSocket
+  // --------------------------------------------------------------------------
+  const sendStreamingChunk = useCallback((chunk: Float32Array) => {
+    if (
+      !isMicCaptureActiveRef.current ||
+      !isWsStreamingRef.current ||
+      voiceStateRef.current !== "listening"
+    ) {
+      return;
+    }
+    const ws = sttSocketRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(convertFloat32ToInt16(chunk));
+      } catch (_) {}
+    } else if (ws && ws.readyState === WebSocket.CONNECTING) {
+      wsPendingQueueRef.current.push(chunk);
+    }
+  }, []);
+
+  const startStreamingSTT = useCallback(
+    (initialBuffers: Float32Array[]) => {
+      hasWsFinalizedRef.current = false;
+      isWsStreamingRef.current = true;
+
+      const existingWs = sttSocketRef.current;
+      // Fast-path: If persistent WebSocket is already connected, stream immediately with 0ms latency!
+      if (existingWs && existingWs.readyState === WebSocket.OPEN) {
+        for (const buf of initialBuffers) {
+          try {
+            existingWs.send(convertFloat32ToInt16(buf));
+          } catch (_) {}
+        }
+        return;
+      }
+
+      // If socket is already in connecting state, queue buffers
+      if (existingWs && existingWs.readyState === WebSocket.CONNECTING) {
+        wsPendingQueueRef.current.push(...initialBuffers);
+        return;
+      }
+
+      wsPendingQueueRef.current = [...initialBuffers];
+
+      const baseWs = (
+        process.env.NEXT_PUBLIC_FASTAPI_WS_URL ||
+        process.env.NEXT_PUBLIC_FASTAPI_URL ||
+        "http://127.0.0.1:8001"
+      ).replace(/^http/, "ws");
+
+      const sampleRate = audioContextRef.current?.sampleRate || 48000;
+      const langParam = isManualLanguageSelectionRef.current && selectedLanguage !== "auto"
+        ? `&language=${selectedLanguage}`
+        : "&language=auto";
+      const existingLeadParam = currentLeadRef.current
+        ? `&existing_lead=${encodeURIComponent(JSON.stringify(currentLeadRef.current))}`
+        : "";
+      const leadIdParam = activeLeadIdRef.current ? `&lead_id=${activeLeadIdRef.current}` : "";
+      const wsUrl = `${baseWs}/ws/voice-stt?sample_rate=${sampleRate}${langParam}&module=module1${existingLeadParam}${leadIdParam}`;
+
+      try {
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = "arraybuffer";
+        sttSocketRef.current = ws;
+
+        ws.onopen = () => {
+          while (wsPendingQueueRef.current.length > 0) {
+            const buf = wsPendingQueueRef.current.shift();
+            if (buf && ws.readyState === WebSocket.OPEN) {
+              try {
+                ws.send(convertFloat32ToInt16(buf));
+              } catch (_) {}
+            }
+          }
+        };
+
+        ws.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            if (data.type === "interim") {
+              const interimText = (data.transcript || "").trim();
+              if (interimText) {
+                setTranscript(interimText);
+              }
+            } else if (data.type === "final") {
+              if (!hasWsFinalizedRef.current) {
+                hasWsFinalizedRef.current = true;
+                const tFinalStt = performance.now();
+                sttFinalPerfTimestampRef.current = tFinalStt;
+                console.log(`[LATENCY] 1. FINAL-STT received at perf=${tFinalStt.toFixed(3)}ms text="${(data.transcript || '').trim()}"`);
+                if (silenceTimerRef.current) {
+                  clearTimeout(silenceTimerRef.current);
+                  silenceTimerRef.current = null;
+                }
+                isWsStreamingRef.current = false;
+
+                const activeTurn = turnIdRef.current;
+                const abortController = activeAbortControllerRef.current || new AbortController();
+                activeAbortControllerRef.current = abortController;
+                handleFinalSTTResponse(data, activeTurn, abortController);
+              }
+            } else if (data.type === "sentence") {
+              const sentenceText = (data.sentence || "").trim();
+              if (sentenceText && sentenceAudioQueueRef.current) {
+                setAssistantResponseText((prev) => prev ? `${prev} ${sentenceText}` : sentenceText);
+                setConversationMessages((prev) => {
+                  const last = prev[prev.length - 1];
+                  if (last && last.sender === "assistant" && last.id === currentWsSentenceMsgIdRef.current) {
+                    return [...prev.slice(0, -1), { ...last, text: `${last.text} ${sentenceText}`.trim() }];
+                  }
+                  const newId = `asst-ws-${Date.now()}`;
+                  currentWsSentenceMsgIdRef.current = newId;
+                  return [
+                    ...prev,
+                    {
+                      id: newId,
+                      sender: "assistant",
+                      text: sentenceText,
+                      timestamp: formatMessageTime(),
+                    },
+                  ];
+                });
+                setVoiceState("speaking");
+                voiceStateRef.current = "speaking";
+                setIsTTSPlaying(true);
+                const sentenceLang = (isManualLanguageSelectionRef.current && selectedLanguage !== "auto")
+                  ? selectedLanguage
+                  : (detectedLanguageRef.current || detectedLanguage || "en");
+                sentenceAudioQueueRef.current.enqueueSentence(sentenceText, sentenceLang);
+              }
+            } else if (data.type === "stream_complete") {
+              if (sentenceAudioQueueRef.current) {
+                sentenceAudioQueueRef.current.markStreamComplete();
+              }
+            }
+          } catch (parseErr) {
+            console.warn("[VoiceCopilot] STT WS parse error:", parseErr);
+          }
+        };
+
+        ws.onerror = (err) => {
+          console.warn("[VoiceCopilot] STT WebSocket error:", err);
+        };
+
+        ws.onclose = () => {
+          if (sttSocketRef.current === ws) {
+            sttSocketRef.current = null;
+            isWsStreamingRef.current = false;
+          }
+        };
+      } catch (wsErr) {
+        console.warn("[VoiceCopilot] Unable to open STT WebSocket:", wsErr);
+        sttSocketRef.current = null;
+        isWsStreamingRef.current = false;
+      }
+    },
+    [handleFinalSTTResponse, selectedLanguage]
+  );
+
+  // Keep ref updated for immediate instant barge-in trigger
+  useEffect(() => {
+    startStreamingSTTRef.current = startStreamingSTT;
+  }, [startStreamingSTT]);
+
+  // Load active TTS model from ModelManager to keep it as authoritative source of truth
+  useEffect(() => {
+    let isMounted = true;
+    const fetchActiveTtsModel = async () => {
+      try {
+        const res = await fetch("/api/models/active", { cache: "no-store" });
+        if (res.ok) {
+          const data = await res.json();
+          const ttsModel = data?.active?.tts?.model_id || data?.active?.tts?.id;
+          if (ttsModel && isMounted) {
+            activeTtsModelRef.current = ttsModel;
+            if (sentenceAudioQueueRef.current) {
+              sentenceAudioQueueRef.current.setOptions({
+                module: "module1",
+                model: ttsModel,
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[VoiceCopilot] Could not fetch active TTS model:", err);
+      }
+    };
+    fetchActiveTtsModel();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // --------------------------------------------------------------------------
   // HANDLER: submitCurrentSpeechTurn
   // --------------------------------------------------------------------------
-  // • WHAT IT DOES: Finalizes the recorded speech segment after 400ms of silence,
-  //   discards noise glitches (< 300ms), encodes PCM to 16-bit WAV, and invokes processSpeechTurn.
-  // • INPUTS: None (reads from recordedBuffersRef).
-  // • OUTPUT: None (dispatches async processing pipeline).
-  // • WHY IT IS USED: Converts continuously captured microphone buffers into a single
-  //   clean turn audio file ready for speech-to-text.
-  // • WHERE IT FITS IN THE FLOW:
-  //     [User finishes speaking + 400ms silence] -> [submitCurrentSpeechTurn] -> [processSpeechTurn]
+  // • WHAT IT DOES: Finalizes the current speech turn either automatically upon VAD
+  //   silence detection (isManual=false) or immediately when the user clicks the
+  //   "Finish speaking" button (isManual=true).
+  // • For manual clicks: immediately stops listening capture, bypasses VAD silence/duration
+  //   thresholds, sends STT Finalize (or HTTP fallback), and triggers LLM -> TTS pipeline
+  //   exactly once while guarding against duplicate invocations.
   // --------------------------------------------------------------------------
-  const submitCurrentSpeechTurn = useCallback(() => {
-    if (isVoicePipelineActiveRef.current) return;
+  const submitCurrentSpeechTurn = useCallback((isManual: boolean = false) => {
+    // Prevent duplicate processing if a turn is already finalizing/active
+    if (isVoicePipelineActiveRef.current || voiceStateRef.current === "processing") return;
+
+    // Immediately STOP/disable user's microphone capture for the current turn
+    if (isManual) {
+      isMicCaptureActiveRef.current = false;
+      if (audioStreamRef.current) {
+        try {
+          audioStreamRef.current.getTracks().forEach((track) => {
+            track.enabled = false;
+            track.stop();
+          });
+        } catch (_) {}
+        audioStreamRef.current = null;
+      }
+      if (filterNodesRef.current.length > 0) {
+        filterNodesRef.current.forEach((node) => {
+          try {
+            node.disconnect();
+          } catch (_) {}
+        });
+        filterNodesRef.current = [];
+      }
+      if (audioSourceNodeRef.current) {
+        try {
+          audioSourceNodeRef.current.disconnect();
+        } catch (_) {}
+        audioSourceNodeRef.current = null;
+      }
+      if (analyserRef.current) {
+        try {
+          analyserRef.current.disconnect();
+        } catch (_) {}
+        analyserRef.current = null;
+      }
+      if (audioWorkletNodeRef.current) {
+        try {
+          audioWorkletNodeRef.current.port.onmessage = null;
+          audioWorkletNodeRef.current.disconnect();
+        } catch (_) {}
+        audioWorkletNodeRef.current = null;
+      }
+      if (scriptProcessorRef.current) {
+        try {
+          scriptProcessorRef.current.onaudioprocess = null;
+          scriptProcessorRef.current.disconnect();
+        } catch (_) {}
+        scriptProcessorRef.current = null;
+      }
+      if (silentGainRef.current) {
+        try {
+          silentGainRef.current.disconnect();
+        } catch (_) {}
+        silentGainRef.current = null;
+      }
+      setAudioLevels([]);
+    }
 
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
+    if (autoListenTimeoutRef.current) {
+      clearTimeout(autoListenTimeoutRef.current);
+      autoListenTimeoutRef.current = null;
+    }
+
+    // Immediately stop microphone speech detection and mark turn inactive
     isSpeechTurnActiveRef.current = false;
     speechDetectedRef.current = false;
+    wasSpeakingRef.current = false;
+    consecutiveSpeechFramesRef.current = 0;
+    consecutiveBargeInFramesRef.current = 0;
 
-    const buffersToEncode = [...recordedBuffersRef.current];
+    // Collect recorded audio buffers, falling back to rolling pre-roll if onset wasn't confirmed
+    const recordedBuffers = [...recordedBuffersRef.current];
+    const preRollBuffers = [...preRollBuffersRef.current];
     recordedBuffersRef.current = [];
-    preRollBuffersRef.current = []; // Clear pre-roll buffer so previous turn's audio does not bleed into the next turn
+    preRollBuffersRef.current = [];
 
-    if (buffersToEncode.length === 0) return;
+    const buffersToEncode = recordedBuffers.length > 0 ? recordedBuffers : preRollBuffers;
 
     const sampleRate = audioContextRef.current?.sampleRate || 48000;
     const totalSamples = buffersToEncode.reduce((acc, b) => acc + b.length, 0);
     const duration = totalSamples / sampleRate;
 
-    // Discard noise glitches (< 400ms)
-    if (duration < 0.40) {
-      return;
-    }
+    // For automatic VAD silence timer: run duration and energy validation gates
+    if (!isManual) {
+      if (buffersToEncode.length === 0) return;
 
-    // Energy validation: verify that the recorded segment contains genuine speech energy
-    let totalEnergy = 0;
-    let peakRms = 0;
-    for (const buf of buffersToEncode) {
-      let sum = 0;
-      for (let i = 0; i < buf.length; i++) {
-        sum += buf[i] * buf[i];
+      // Discard noise glitches (< 300ms)
+      if (duration < 0.30) {
+        console.log(`[VoiceCopilot:VAD] Discarded brief noise glitch (duration: ${(duration * 1000).toFixed(0)}ms < 300ms)`);
+        isWsStreamingRef.current = false;
+        return;
       }
-      const bufRms = Math.sqrt(sum / buf.length);
-      totalEnergy += bufRms;
-      if (bufRms > peakRms) peakRms = bufRms;
-    }
-    const avgRms = totalEnergy / buffersToEncode.length;
 
-    // If overall energy is only room noise (e.g. distant murmur or quiet fan hum)
-    if (avgRms < 0.013 && peakRms < 0.022) {
-      console.log(`[VoiceCopilot:VAD] Discarded low-energy ambient sound (avgRms: ${avgRms.toFixed(4)}, peak: ${peakRms.toFixed(4)})`);
+      // Energy validation: verify that the recorded segment contains genuine speech energy in dBFS
+      let totalEnergy = 0;
+      let peakRms = 0;
+      let voicedFramesCount = 0;
+      const continuationThresholdRms = Math.pow(
+        10,
+        Math.max(-48.0, ambientNoiseFloorDbRef.current + 4.5) / 20
+      );
+
+      for (const buf of buffersToEncode) {
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) {
+          sum += buf[i] * buf[i];
+        }
+        const bufRms = Math.sqrt(sum / buf.length);
+        totalEnergy += bufRms;
+        if (bufRms > peakRms) peakRms = bufRms;
+        if (bufRms >= continuationThresholdRms) {
+          voicedFramesCount++;
+        }
+      }
+      const avgRms = totalEnergy / buffersToEncode.length;
+      const segmentAvgDb = 20 * Math.log10(Math.max(avgRms, 1e-5));
+      const peakDb = 20 * Math.log10(Math.max(peakRms, 1e-5));
+      const voicedDensity = buffersToEncode.length > 0 ? voicedFramesCount / buffersToEncode.length : 0;
+
+      // Discard if overall energy is room noise or an isolated click or lacks close-proximity peak
+      const minRequiredPeakDb = primarySpeakerProfileRef.current.isCalibrated ? -38.0 : -34.0;
+      if (
+        segmentAvgDb < ambientNoiseFloorDbRef.current + 3.5 ||
+        peakDb < minRequiredPeakDb ||
+        voicedDensity < 0.20
+      ) {
+        if (process.env.NODE_ENV !== "production") {
+          console.log(
+            `[VAD:FINALIZE] Discarded non-speech segment (avgDb: ${segmentAvgDb.toFixed(1)}dBFS, peakDb: ${peakDb.toFixed(1)}dBFS, floor: ${ambientNoiseFloorDbRef.current.toFixed(1)}dBFS, density: ${(voicedDensity * 100).toFixed(0)}%, duration: ${(duration * 1000).toFixed(0)}ms, accepted=false)`
+          );
+        }
+        isWsStreamingRef.current = false;
+        return;
+      }
+
+      if (process.env.NODE_ENV !== "production") {
+        console.log(
+          `[VAD:FINALIZE] avgDb=${segmentAvgDb.toFixed(1)} peakDb=${peakDb.toFixed(1)} density=${(voicedDensity * 100).toFixed(0)}% duration=${(duration * 1000).toFixed(0)}ms accepted=true`
+        );
+      }
+    }
+
+    // Immediately stop microphone capture/listening turn and set processing state
+    isVoicePipelineActiveRef.current = true;
+    setVoiceState("processing");
+    voiceStateRef.current = "processing";
+    setProcessingStage("transcribing");
+    setErrorMessage(null);
+
+    // Stop sending further audio to STT
+    isWsStreamingRef.current = false;
+    wsPendingQueueRef.current = [];
+
+    const currentTurnId = ++turnIdRef.current;
+    hasFirstAudioPlayedRef.current = false;
+    hasWsFinalizedRef.current = false;
+    const abortController = new AbortController();
+    activeAbortControllerRef.current = abortController;
+
+    const ws = sttSocketRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ type: "Finalize" }));
+      } catch (wsErr) {
+        console.warn("[VoiceCopilot] Failed to send Finalize over WS:", wsErr);
+      }
       return;
     }
 
-    const wavBlob = encodeWav(buffersToEncode, sampleRate);
+    // If WebSocket is not open (null, connecting, or closed), cancel any in-flight connection
+    if (ws && ws.readyState === WebSocket.CONNECTING) {
+      try {
+        ws.close();
+      } catch (_) {}
+      sttSocketRef.current = null;
+    }
+
+    // HTTP Fallback STT: encode available audio and process speech turn
+    const safeBuffers = buffersToEncode.length > 0
+      ? buffersToEncode
+      : [new Float32Array(Math.floor(sampleRate * 0.1))];
+
+    const wavBlob = encodeWav(safeBuffers, sampleRate);
     if (onAudioRecorded) {
       onAudioRecorded(wavBlob);
     }
 
-    const currentTurnId = ++turnIdRef.current;
     processSpeechTurn(wavBlob, currentTurnId);
   }, [onAudioRecorded]);
 
@@ -1137,6 +1870,7 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
         speechDetectedRef.current = false;
         isSpeechTurnActiveRef.current = false;
         recordedBuffersRef.current = [];
+        hasFirstAudioPlayedRef.current = false;
 
         if (typeof window === "undefined" || !navigator?.mediaDevices?.getUserMedia) {
           setErrorMessage("Microphone access is not supported in this browser environment.");
@@ -1158,10 +1892,12 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
           !needsNewStream &&
           audioContextRef.current &&
           audioContextRef.current.state === "running" &&
-          scriptProcessorRef.current !== null &&
+          (audioWorkletNodeRef.current !== null || scriptProcessorRef.current !== null) &&
           audioSourceNodeRef.current !== null;
 
         if (isGraphAlreadyRunning) {
+          stream?.getAudioTracks().forEach((t) => (t.enabled = true));
+          isMicCaptureActiveRef.current = true;
           setVoiceState("listening");
           voiceStateRef.current = "listening";
           setProcessingStage(null);
@@ -1193,6 +1929,13 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
         if (!isContinuousModeRef.current) return;
 
         stream.getAudioTracks().forEach((t) => (t.enabled = true));
+        isMicCaptureActiveRef.current = true;
+
+        const activeTrack = stream.getAudioTracks()[0];
+        console.log(
+          `[MIC:PROBE] Device: "${activeTrack?.label}" | readyState: ${activeTrack?.readyState} | enabled: ${activeTrack?.enabled} | muted: ${activeTrack?.muted} | settings:`,
+          activeTrack?.getSettings()
+        );
 
         // 2. Disconnect and reset previous audio processing nodes to prevent stale node reuse
         if (filterNodesRef.current.length > 0) {
@@ -1214,6 +1957,13 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
             analyserRef.current.disconnect();
           } catch (_) {}
           analyserRef.current = null;
+        }
+        if (audioWorkletNodeRef.current) {
+          try {
+            audioWorkletNodeRef.current.port.onmessage = null;
+            audioWorkletNodeRef.current.disconnect();
+          } catch (_) {}
+          audioWorkletNodeRef.current = null;
         }
         if (scriptProcessorRef.current) {
           try {
@@ -1254,30 +2004,34 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
           await resumePromiseRef.current;
         }
 
+        console.log(
+          `[AUDIO_CTX:PROBE] state: "${audioCtx.state}" | sampleRate: ${audioCtx.sampleRate}Hz | destinationChannels: ${audioCtx.destination?.channelCount}`
+        );
+
         if (!isContinuousModeRef.current || audioCtx.state === "closed") return;
 
         // 4. Create DSP speech bandpass filters from the active AudioContext instance
         const source = audioCtx.createMediaStreamSource(stream);
         audioSourceNodeRef.current = source;
 
-        // High-pass filter (85 Hz) to strip low-frequency mechanical rumble, AC hum, desk thumps, breathing plosives
+        // High-pass filter (135 Hz) to strip HVAC hum, fan rumble (50/60/100/120 Hz), traffic, table vibrations
         const highpass = audioCtx.createBiquadFilter();
         highpass.type = "highpass";
-        highpass.frequency.value = 85;
-        highpass.Q.value = 0.7;
+        highpass.frequency.value = 135;
+        highpass.Q.value = 0.707;
 
-        // Low-pass filter (3800 Hz) to eliminate high-frequency fan hiss, keyboard clicks, coil whine
+        // Low-pass filter (3600 Hz) to eliminate high-frequency fan hiss, keyboard click harmonics, coil whine
         const lowpass = audioCtx.createBiquadFilter();
         lowpass.type = "lowpass";
-        lowpass.frequency.value = 3800;
-        lowpass.Q.value = 0.7;
+        lowpass.frequency.value = 3600;
+        lowpass.Q.value = 0.707;
 
-        // Intelligibility peaking bandpass (1200 Hz, +3dB) to enhance nearby voice clarity
+        // Intelligibility peaking bandpass (1500 Hz, +2.5dB) to enhance nearby voice presence over diffuse background
         const voicePeaking = audioCtx.createBiquadFilter();
         voicePeaking.type = "peaking";
-        voicePeaking.frequency.value = 1200;
-        voicePeaking.gain.value = 3;
-        voicePeaking.Q.value = 1.0;
+        voicePeaking.frequency.value = 1500;
+        voicePeaking.gain.value = 2.5;
+        voicePeaking.Q.value = 1.2;
 
         filterNodesRef.current = [highpass, lowpass, voicePeaking];
 
@@ -1291,147 +2045,390 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
         analyserRef.current = analyser;
         voicePeaking.connect(analyser);
 
-        const processor = audioCtx.createScriptProcessor(4096, 1, 1);
-        scriptProcessorRef.current = processor;
-        voicePeaking.connect(processor);
-
         const silentGain = audioCtx.createGain();
         silentGain.gain.value = 0;
         silentGainRef.current = silentGain;
-
-        processor.connect(silentGain);
         silentGain.connect(audioCtx.destination);
 
-        const maxPreRollCount = Math.max(10, Math.ceil((audioCtx.sampleRate * 0.9) / 4096));
+        const maxPreRollCount = Math.max(16, Math.ceil((audioCtx.sampleRate * 0.85) / 2048));
 
-      // 5. Audio Process Handler with Advanced Speech Discrimination
-      processor.onaudioprocess = (e: AudioProcessingEvent) => {
-        if (!isContinuousModeRef.current && voiceStateRef.current === "idle") {
-          return;
-        }
-
-        const inputChannel = e.inputBuffer.getChannelData(0);
-        const chunk = new Float32Array(inputChannel.length);
-        chunk.set(inputChannel);
-
-        // Calculate RMS of filtered speech signal
-        let sumSq = 0;
-        for (let i = 0; i < chunk.length; i++) {
-          sumSq += chunk[i] * chunk[i];
-        }
-        const rms = Math.sqrt(sumSq / chunk.length);
-
-        // Frequency analysis via AnalyserNode
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        analyser.getByteFrequencyData(dataArray);
-
-        // Vocal formant energy (bins 1 to 18: ~180Hz - 3400Hz at 48kHz)
-        let vocalSum = 0;
-        const maxVocalBin = Math.min(18, dataArray.length - 1);
-        for (let i = 1; i <= maxVocalBin; i++) {
-          vocalSum += dataArray[i];
-        }
-        const vocalEnergy = maxVocalBin > 0 ? vocalSum / maxVocalBin : 0;
-
-        // High frequency noise energy (bins 24 to 64: ~4500Hz - 12000Hz - fan hiss & keyboard clicks)
-        let highSum = 0;
-        let highCount = 0;
-        for (let i = 24; i <= 64 && i < dataArray.length; i++) {
-          highSum += dataArray[i];
-          highCount++;
-        }
-        const highNoise = highCount > 0 ? highSum / highCount : 0;
-
-        // Visualizer waveform (24 bars)
-        const sampleCount = 24;
-        const step = Math.floor(dataArray.length / sampleCount) || 1;
-        const levels = [];
-        for (let i = 0; i < sampleCount; i++) {
-          levels.push(Math.min(100, Math.max(12, Math.round(((dataArray[i * step] || 0) / 255) * 100))));
-        }
-        setAudioLevels(levels);
-
-        // Update rolling pre-roll buffer (keeps last ~800-900ms)
-        if (voiceStateRef.current === "listening" && !isSpeechTurnActiveRef.current) {
-          preRollBuffersRef.current.push(chunk);
-          if (preRollBuffersRef.current.length > maxPreRollCount) {
-            preRollBuffersRef.current.shift();
+        // 5. Audio Process Handler with Adaptive dB-Based VAD & Acoustic Discrimination
+        const processAudioChunk = (chunk: Float32Array, rms: number) => {
+          if (
+            !isMicCaptureActiveRef.current ||
+            voiceStateRef.current === "processing" ||
+            (!isContinuousModeRef.current && voiceStateRef.current === "idle")
+          ) {
+            return;
           }
-        }
 
-        // BARGE-IN: while speaking, detect user interruption with nearby vocal energy
-        if (voiceStateRef.current === "speaking") {
-          bleedRmsRef.current = bleedRmsRef.current * 0.92 + rms * 0.08;
+          // Calculate chunk Peak, true RMS, Crest Factor, and Zero-Crossing Rate
+          let sumSq = 0;
+          let maxPeak = 0;
+          let minVal = 0;
+          let maxVal = 0;
+          let nonZeroCount = 0;
+          let zeroCrossings = 0;
+          let prevSample = chunk[0] || 0;
 
-          const now = Date.now();
-          const hasGracePeriodElapsed = now - sentenceStartTimestampRef.current > 220;
-
-          const isUserBargeIn =
-            hasGracePeriodElapsed &&
-            ((rms >= 0.035 && rms >= bleedRmsRef.current * 1.8 && vocalEnergy >= 24) ||
-              (vocalEnergy >= 30 && vocalEnergy > highNoise * 1.2));
-
-          if (isUserBargeIn) {
-            consecutiveBargeInFramesRef.current++;
-            if (consecutiveBargeInFramesRef.current >= 2) {
-              executeBargeIn();
-              return;
+          for (let i = 0; i < chunk.length; i++) {
+            const s = chunk[i];
+            sumSq += s * s;
+            const abs = Math.abs(s);
+            if (abs > maxPeak) maxPeak = abs;
+            if (s < minVal) minVal = s;
+            if (s > maxVal) maxVal = s;
+            if (s !== 0) nonZeroCount++;
+            if ((s >= 0 && prevSample < 0) || (s < 0 && prevSample >= 0)) {
+              zeroCrossings++;
             }
-          } else {
-            consecutiveBargeInFramesRef.current = Math.max(0, consecutiveBargeInFramesRef.current - 1);
+            prevSample = s;
           }
-          return;
-        }
 
-        // LISTENING STATE: detect speech onset with adaptive noise floor and vocal formants
-        if (voiceStateRef.current === "listening") {
-          // Dynamic adaptive noise floor tracking when not actively speaking
-          if (!isSpeechTurnActiveRef.current) {
-            ambientNoiseFloorRef.current = ambientNoiseFloorRef.current * 0.96 + rms * 0.04;
+          const calculatedRms = Math.sqrt(sumSq / chunk.length);
+          const effectiveRms = rms > 0 ? rms : calculatedRms;
+          const currentDb = 20 * Math.log10(Math.max(effectiveRms, 1e-5));
+          const crestFactor = effectiveRms > 1e-5 ? maxPeak / effectiveRms : 1.0;
+          const zcr = zeroCrossings / chunk.length;
+
+          // Frequency analysis via AnalyserNode
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+          analyser.getByteFrequencyData(dataArray);
+
+          // Vocal formant core energy (bins 2 to 15: ~375Hz - 2812Hz at 48kHz, or ~125Hz - 937Hz at 16kHz)
+          let vocalSum = 0;
+          let maxVocalBinVal = 0;
+          let dominantBin = 2;
+          let weightedBinSum = 0;
+          let totalVocalWeight = 0;
+          const maxVocalBin = Math.min(15, dataArray.length - 1);
+
+          for (let i = 2; i <= maxVocalBin; i++) {
+            const val = dataArray[i];
+            vocalSum += val;
+            if (val > maxVocalBinVal) {
+              maxVocalBinVal = val;
+              dominantBin = i;
+            }
+            weightedBinSum += i * val;
+            totalVocalWeight += val;
           }
-          // Dynamic threshold: nearby speech must rise clearly above the ambient noise floor
-          const dynamicRmsThreshold = Math.max(0.016, Math.min(0.065, ambientNoiseFloorRef.current * 2.6 + 0.007));
-          
-          // Require both RMS above ambient floor AND strong vocal formant energy dominating high noise
-          const isSpeech =
-            rms >= dynamicRmsThreshold &&
-            vocalEnergy >= 16 &&
-            vocalEnergy > highNoise * 0.85;
+          const vocalCount = maxVocalBin - 1;
+          const vocalEnergy = vocalCount > 0 ? vocalSum / vocalCount : 0;
+          const peakProminence = vocalEnergy > 1 ? maxVocalBinVal / vocalEnergy : 1.0;
+          const spectralCentroid = totalVocalWeight > 1 ? weightedBinSum / totalVocalWeight : dominantBin;
 
-          if (isSpeech) {
-            speechEndTimestampRef.current = 0;
-            consecutiveSpeechFramesRef.current++;
-            // Require 3 consecutive speech frames (~250ms of sustained speech) before triggering
-            // This prevents keyboard clicks, fan fluctuations, and momentary glitches from starting a turn!
-            if (!isSpeechTurnActiveRef.current && consecutiveSpeechFramesRef.current >= 3) {
-              isSpeechTurnActiveRef.current = true;
-              speechDetectedRef.current = true;
-              // Prepend pre-roll buffer so leading words (first syllable) are fully preserved
-              recordedBuffersRef.current = [...preRollBuffersRef.current, chunk];
-            } else if (isSpeechTurnActiveRef.current) {
-              recordedBuffersRef.current.push(chunk);
+          // High frequency noise energy (bins 20 to 60: ~3750Hz - 11250Hz - fan hiss, typing clicks)
+          let highSum = 0;
+          let highCount = 0;
+          for (let i = 20; i <= 60 && i < dataArray.length; i++) {
+            highSum += dataArray[i];
+            highCount++;
+          }
+          const highNoise = highCount > 0 ? highSum / highCount : 0;
+
+          // Compute Voicing Harmonicity via normalized autocorrelation if signal is above ambient floor
+          let harmonicity = 0;
+          if (currentDb >= ambientNoiseFloorDbRef.current + 3.0 && vocalEnergy >= 24) {
+            harmonicity = computeHarmonicity(chunk, audioCtx.sampleRate || 48000);
+          }
+
+          // Visualizer waveform (24 bars)
+          const sampleCount = 24;
+          const step = Math.floor(dataArray.length / sampleCount) || 1;
+          const levels = [];
+          for (let i = 0; i < sampleCount; i++) {
+            levels.push(Math.min(100, Math.max(12, Math.round(((dataArray[i * step] || 0) / 255) * 100))));
+          }
+          setAudioLevels(levels);
+
+          // Update rolling pre-roll buffer (keeps last ~800-850ms)
+          if (voiceStateRef.current === "listening" && !isSpeechTurnActiveRef.current) {
+            preRollBuffersRef.current.push(chunk);
+            if (preRollBuffersRef.current.length > maxPreRollCount) {
+              preRollBuffersRef.current.shift();
+            }
+          }
+
+          // BARGE-IN: while assistant is speaking, detect user interruption with nearby vocal energy
+          if (voiceStateRef.current === "speaking") {
+            speakerBleedDbRef.current = Math.max(
+              -60.0,
+              Math.min(-20.0, speakerBleedDbRef.current * 0.92 + currentDb * 0.08)
+            );
+            bleedRmsRef.current = bleedRmsRef.current * 0.92 + effectiveRms * 0.08;
+
+            const now = Date.now();
+            const hasGracePeriodElapsed = now - sentenceStartTimestampRef.current > 70;
+
+            let bargeInHarmonicity = 0;
+            if (currentDb >= Math.max(-36.0, speakerBleedDbRef.current + 5.0) && vocalEnergy >= 28) {
+              bargeInHarmonicity = computeHarmonicity(chunk, audioCtx.sampleRate || 48000);
             }
 
-            if (silenceTimerRef.current) {
-              clearTimeout(silenceTimerRef.current);
-              silenceTimerRef.current = null;
-            }
-          } else {
-            consecutiveSpeechFramesRef.current = 0;
-            if (isSpeechTurnActiveRef.current) {
-              recordedBuffersRef.current.push(chunk);
-              if (!speechEndTimestampRef.current) {
-                speechEndTimestampRef.current = Date.now();
+            // Reject keyboard typing (crestFactor >= 5.8) or diffuse background voices during assistant playback
+            const isUserBargeIn =
+              hasGracePeriodElapsed &&
+              crestFactor < 5.8 &&
+              vocalEnergy >= 32 &&
+              vocalEnergy > highNoise * 1.35 &&
+              (peakProminence >= 1.55 || vocalEnergy >= 50) &&
+              bargeInHarmonicity >= 0.36 &&
+              (currentDb >= Math.max(-36.0, speakerBleedDbRef.current + 6.0) ||
+                (effectiveRms >= 0.038 && effectiveRms >= bleedRmsRef.current * 1.8));
+
+            if (isUserBargeIn) {
+              consecutiveBargeInFramesRef.current++;
+              if (consecutiveBargeInFramesRef.current >= 2) {
+                console.log(
+                  `[VAD:BARGE_IN] ACCEPT_BARGE_IN | dBFS=${currentDb.toFixed(1)} | vocalE=${vocalEnergy.toFixed(1)} | peakiness=${peakProminence.toFixed(2)} | harmonicity=${bargeInHarmonicity.toFixed(2)}`
+                );
+                executeBargeIn();
+                return;
               }
-              if (!silenceTimerRef.current) {
-                silenceTimerRef.current = setTimeout(() => {
-                  submitCurrentSpeechTurn();
-                }, 850); // 850ms natural cadence pause - ensures continuous speech, multi-clause inputs, and phone numbers are never cut off mid-utterance
+            } else {
+              consecutiveBargeInFramesRef.current = Math.max(0, consecutiveBargeInFramesRef.current - 1);
+            }
+            return;
+          }
+
+          // LISTENING STATE: detect speech onset with adaptive dB noise floor, vocal formants, and speaker discrimination
+          if (voiceStateRef.current === "listening") {
+            // Adaptive dB noise floor tracking when not actively speaking
+            if (!isSpeechTurnActiveRef.current) {
+              ambientNoiseFloorDbRef.current = Math.max(
+                -65.0,
+                Math.min(-35.0, ambientNoiseFloorDbRef.current * 0.96 + currentDb * 0.04)
+              );
+              ambientNoiseFloorRef.current = Math.pow(10, ambientNoiseFloorDbRef.current / 20);
+            }
+
+            // Dynamic SNR onset margin: adapts to ambient room volume
+            const snrMarginDb = Math.max(
+              9.0,
+              Math.min(14.0, 11.0 - (ambientNoiseFloorDbRef.current + 45.0) * 0.25)
+            );
+
+            // Proximity & Direct-to-Reverberant Ratio (DRR):
+            // Close-mic primary user has sharp formant resonance peaks (peakProminence >= 1.60)
+            // and strong voicing harmonicity (harmonicity >= 0.38).
+            // Diffuse background speakers (reverberant field) have smeared spectra (peakProminence < 1.48)
+            // and low harmonicity (< 0.38).
+            const condProximity =
+              (peakProminence >= 1.60 && harmonicity >= 0.38) ||
+              (peakProminence >= 1.85) ||
+              (vocalEnergy >= 55 && harmonicity >= 0.48);
+
+            // Proximity-tuned onset threshold:
+            // When close-mic proximity is high (sharp formants & periodicity), safely accept soft primary speech down to -38.0 dBFS.
+            // When diffuse/unconfirmed, clamp strictly at -35.0 dBFS to reject background speakers!
+            const dynamicDbOnsetThreshold = condProximity
+              ? Math.max(-38.0, ambientNoiseFloorDbRef.current + 8.0)
+              : Math.max(-35.0, ambientNoiseFloorDbRef.current + snrMarginDb);
+            const snr = currentDb - ambientNoiseFloorDbRef.current;
+
+            // 1. Level check: dBFS above dynamic floor
+            const condDb = currentDb >= dynamicDbOnsetThreshold;
+
+            // 2. Vocal energy check: vocal formant energy >= 34
+            const condVocal = vocalEnergy >= 34;
+
+            // 3. Formant dominance over high noise:
+            const condFormant = vocalEnergy > highNoise * 1.30;
+
+            // 4. Crest factor check: reject keyboard typing clicks (> 5.8) unless high vocal plosive
+            const condCrest = crestFactor <= 5.8 || vocalEnergy >= 50;
+
+            // 5. Zero-crossing rate: reject friction noise / bursts (> 0.24) unless loud voice
+            const condZcr = zcr <= 0.24 || vocalEnergy >= 40;
+
+            // 7. Speaker Discrimination against Primary Profile (if calibrated):
+            let isProfileMatch = true;
+            let profileRejectReason = "";
+            if (primarySpeakerProfileRef.current.isCalibrated) {
+              const binDiff = Math.abs(dominantBin - primarySpeakerProfileRef.current.dominantBin);
+              const centroidDiff = Math.abs(spectralCentroid - primarySpeakerProfileRef.current.centroid);
+
+              if (binDiff > 3.0 && centroidDiff > 4.5) {
+                if (!(peakProminence >= 2.2 && currentDb >= -24.0 && harmonicity >= 0.65)) {
+                  isProfileMatch = false;
+                  profileRejectReason = `SPEAKER_PROFILE_MISMATCH (binDiff=${binDiff.toFixed(1)}, centroidDiff=${centroidDiff.toFixed(1)})`;
+                }
+              }
+            }
+
+            const isSpeechCandidate =
+              condDb &&
+              condVocal &&
+              condFormant &&
+              condCrest &&
+              condZcr &&
+              condProximity &&
+              isProfileMatch;
+
+            // Structured logging with exact ACCEPT/REJECT reason and metrics
+            let decisionReason = "";
+            if (isSpeechCandidate) {
+              decisionReason = "CLOSE_MIC_PRIMARY_QUALIFIED";
+            } else if (!isProfileMatch) {
+              decisionReason = profileRejectReason;
+            } else if (!condProximity && condDb && condVocal) {
+              decisionReason = `DIFFUSE_SECONDARY_SPEAKER (peakiness=${peakProminence.toFixed(2)} < 1.60, harmonicity=${harmonicity.toFixed(2)} < 0.38)`;
+            } else if (!condCrest) {
+              decisionReason = `TRANSIENT_IMPULSE (crest=${crestFactor.toFixed(2)} > 5.8)`;
+            } else if (!condZcr) {
+              decisionReason = `HIGH_ZCR_FRICTION (zcr=${zcr.toFixed(3)} > 0.24)`;
+            } else if (!condFormant) {
+              decisionReason = `HIGH_NOISE_DOMINANT (vocal=${vocalEnergy.toFixed(1)} <= ${highNoise.toFixed(1)}*1.30)`;
+            } else {
+              decisionReason = `LOW_ENERGY_OR_FLOOR (dBFS=${currentDb.toFixed(1)} < ${dynamicDbOnsetThreshold.toFixed(1)})`;
+            }
+
+            const decisionType = isSpeechCandidate
+              ? "ACCEPT_PRIMARY_SPEAKER"
+              : !isProfileMatch || (!condProximity && condDb && condVocal)
+              ? "REJECT_SECONDARY_SPEAKER"
+              : "REJECT_NOISE";
+
+            if (process.env.NODE_ENV !== "production") {
+              console.log(
+                `[VAD:DECISION] ${decisionType} | reason=${decisionReason} | dBFS=${currentDb.toFixed(1)} | SNR=${snr.toFixed(1)}dB | floor=${ambientNoiseFloorDbRef.current.toFixed(1)}dB | vocalE=${vocalEnergy.toFixed(1)} | peakiness=${peakProminence.toFixed(2)} | harmonicity=${harmonicity.toFixed(2)} | dominantBin=${dominantBin} | profileMatch=${isProfileMatch} | candidate=${isSpeechCandidate} | frames=${consecutiveSpeechFramesRef.current} | turnActive=${isSpeechTurnActiveRef.current}`
+              );
+            }
+
+            if (isSpeechCandidate) {
+              wasSpeakingRef.current = true;
+              speechEndTimestampRef.current = 0;
+              consecutiveSpeechFramesRef.current++;
+
+              // Require 3 consecutive qualifying speech frames (~128ms) to confirm genuine speech onset
+              if (!isSpeechTurnActiveRef.current && consecutiveSpeechFramesRef.current >= 3) {
+                isSpeechTurnActiveRef.current = true;
+                speechDetectedRef.current = true;
+
+                // Calibrate primary speaker profile if not already locked
+                if (!primarySpeakerProfileRef.current.isCalibrated) {
+                  primarySpeakerProfileRef.current = {
+                    dominantBin,
+                    centroid: spectralCentroid,
+                    formantRatio: vocalEnergy / Math.max(highNoise, 1.0),
+                    peakProminence,
+                    sampleCount: 1,
+                    isCalibrated: true,
+                  };
+                  console.log(
+                    `[VAD:PROFILE] Primary speaker calibrated: dominantBin=${dominantBin}, centroid=${spectralCentroid.toFixed(2)}, peakiness=${peakProminence.toFixed(2)}`
+                  );
+                }
+
+                // Prepend pre-roll buffer (~800ms) so first syllables/words in en/hi/mr are 100% preserved
+                recordedBuffersRef.current = [...preRollBuffersRef.current, chunk];
+                startStreamingSTT([...preRollBuffersRef.current, chunk]);
+              } else if (isSpeechTurnActiveRef.current) {
+                recordedBuffersRef.current.push(chunk);
+                sendStreamingChunk(chunk);
+
+                // Gentle update of primary speaker profile during confirmed speech
+                if (primarySpeakerProfileRef.current.isCalibrated && condProximity) {
+                  const p = primarySpeakerProfileRef.current;
+                  p.dominantBin = p.dominantBin * 0.95 + dominantBin * 0.05;
+                  p.centroid = p.centroid * 0.95 + spectralCentroid * 0.05;
+                  p.peakProminence = p.peakProminence * 0.95 + peakProminence * 0.05;
+                  p.sampleCount++;
+                }
+              }
+
+              if (silenceTimerRef.current) {
+                clearTimeout(silenceTimerRef.current);
+                silenceTimerRef.current = null;
+              }
+            } else {
+              consecutiveSpeechFramesRef.current = 0;
+              if (isSpeechTurnActiveRef.current) {
+                recordedBuffersRef.current.push(chunk);
+                sendStreamingChunk(chunk);
+
+                // HYSTERESIS: While turn is active, use tuned continuation threshold
+                // Rejects background room murmurs during pauses while preserving natural speech hesitations
+                // and unvoiced consonants in phone numbers / loan amounts (six, सात, पाच, fifty)
+                const continuationThresholdDb = Math.max(
+                  -42.0,
+                  ambientNoiseFloorDbRef.current + 5.5
+                );
+                const isSpeechContinuation =
+                  currentDb >= continuationThresholdDb &&
+                  (vocalEnergy >= 20 || (highNoise >= 24 && zcr >= 0.12));
+
+                if (isSpeechContinuation) {
+                  wasSpeakingRef.current = true;
+                  if (silenceTimerRef.current) {
+                    clearTimeout(silenceTimerRef.current);
+                    silenceTimerRef.current = null;
+                  }
+                } else {
+                  if (wasSpeakingRef.current) {
+                    speechEndTimestampRef.current = Date.now();
+                    wasSpeakingRef.current = false;
+                  }
+                  if (!silenceTimerRef.current) {
+                    silenceTimerRef.current = setTimeout(() => {
+                      console.log(
+                        `[LATENCY] T1 Microphone speech END confirmed at perf=${performance.now().toFixed(3)}ms (floor: ${ambientNoiseFloorDbRef.current.toFixed(1)}dBFS)`
+                      );
+                      submitCurrentSpeechTurn();
+                    }, 800); // 800ms silence timeout across all speech turns with hysteresis to prevent premature cutoffs during pauses in numbers, amounts, or clauses
+                  }
+                }
               }
             }
           }
+        };
+
+        // Prefer AudioWorklet for low latency without main-thread blocking
+        let usedAudioWorklet = false;
+        if (typeof AudioWorkletNode !== "undefined" && audioCtx.audioWorklet) {
+          try {
+            if (!workletLoadedContextsRef.current.has(audioCtx)) {
+              await audioCtx.audioWorklet.addModule("/worklets/pcm-capture-processor.js");
+              workletLoadedContextsRef.current.add(audioCtx);
+            }
+            const workletNode = new AudioWorkletNode(audioCtx, "pcm-capture-processor", {
+              processorOptions: { bufferSize: 2048 },
+            });
+            audioWorkletNodeRef.current = workletNode;
+            workletNode.port.onmessage = (e: MessageEvent) => {
+              if (e.data && e.data.type === "audio_data") {
+                processAudioChunk(e.data.buffer, e.data.rms);
+              }
+            };
+            voicePeaking.connect(workletNode);
+            workletNode.connect(silentGain);
+            usedAudioWorklet = true;
+            console.log("[VoiceCopilot] AudioWorkletNode initialized successfully.");
+          } catch (workletErr) {
+            console.warn("[VoiceCopilot] AudioWorklet init failed, falling back to ScriptProcessorNode:", workletErr);
+          }
         }
-      };
+
+        if (!usedAudioWorklet) {
+          const processor = audioCtx.createScriptProcessor(2048, 1, 1);
+          scriptProcessorRef.current = processor;
+          voicePeaking.connect(processor);
+          processor.onaudioprocess = (e: AudioProcessingEvent) => {
+            const inputChannel = e.inputBuffer.getChannelData(0);
+            const chunk = new Float32Array(inputChannel.length);
+            chunk.set(inputChannel);
+
+            let sumSq = 0;
+            for (let i = 0; i < chunk.length; i++) {
+              sumSq += chunk[i] * chunk[i];
+            }
+            const rms = Math.sqrt(sumSq / chunk.length);
+            processAudioChunk(chunk, rms);
+          };
+          processor.connect(silentGain);
+          console.log("[VoiceCopilot] ScriptProcessorNode fallback initialized.");
+        }
 
       setVoiceState("listening");
       voiceStateRef.current = "listening";
@@ -1450,54 +2447,198 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
   } finally {
     releaseLock!();
   }
-}, [executeBargeIn, submitCurrentSpeechTurn]);
+}, [executeBargeIn, sendStreamingChunk, startStreamingSTT, submitCurrentSpeechTurn]);
 
-  // User manually finishes speaking or VAD silence timer fires
+  // Keep startListeningTurnRef up to date for reliable invocation from audio callbacks
+  useEffect(() => {
+    startListeningTurnRef.current = startListeningTurn;
+  }, [startListeningTurn]);
+
+  // User manually finishes speaking / ends continuous conversation session
   const finishSpeakingTurn = useCallback(() => {
-    submitCurrentSpeechTurn();
-  }, [submitCurrentSpeechTurn]);
+    // 1. Mark continuous session as finished so that subsequent turns do NOT auto-listen
+    isContinuousModeRef.current = false;
 
-  // Start continuous voice assistant session
-  const startVoiceMode = useCallback(() => {
-    cancelActiveTurn();
-    isContinuousModeRef.current = true;
-    setElapsedSeconds(0);
+    // 2. Stop any pending auto-listen, silence, or session timers immediately
+    if (autoListenTimeoutRef.current) {
+      clearTimeout(autoListenTimeoutRef.current);
+      autoListenTimeoutRef.current = null;
+    }
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
 
-    // If previous lead was completed, start fresh from Name
-    const isPriorComplete = currentLeadRef.current && (
-      Boolean(currentLeadRef.current.name) &&
-      Boolean(currentLeadRef.current.phone) &&
-      Boolean(currentLeadRef.current.company) &&
-      Boolean(currentLeadRef.current.loan_type) &&
-      Boolean(currentLeadRef.current.loan_amount) &&
-      Boolean(currentLeadRef.current.tenure_months)
-    );
-    if (isPriorComplete) {
+    // 3. Immediately STOP/disable user's microphone capture for current turn
+    isMicCaptureActiveRef.current = false;
+    if (audioStreamRef.current) {
+      try {
+        audioStreamRef.current.getTracks().forEach((track) => {
+          track.enabled = false;
+          track.stop();
+        });
+      } catch (_) {}
+      audioStreamRef.current = null;
+    }
+    if (filterNodesRef.current.length > 0) {
+      filterNodesRef.current.forEach((node) => {
+        try {
+          node.disconnect();
+        } catch (_) {}
+      });
+      filterNodesRef.current = [];
+    }
+    if (audioSourceNodeRef.current) {
+      try {
+        audioSourceNodeRef.current.disconnect();
+      } catch (_) {}
+      audioSourceNodeRef.current = null;
+    }
+    if (analyserRef.current) {
+      try {
+        analyserRef.current.disconnect();
+      } catch (_) {}
+      analyserRef.current = null;
+    }
+    if (audioWorkletNodeRef.current) {
+      try {
+        audioWorkletNodeRef.current.port.onmessage = null;
+        audioWorkletNodeRef.current.disconnect();
+      } catch (_) {}
+      audioWorkletNodeRef.current = null;
+    }
+    if (scriptProcessorRef.current) {
+      try {
+        scriptProcessorRef.current.onaudioprocess = null;
+        scriptProcessorRef.current.disconnect();
+      } catch (_) {}
+      scriptProcessorRef.current = null;
+    }
+    if (silentGainRef.current) {
+      try {
+        silentGainRef.current.disconnect();
+      } catch (_) {}
+      silentGainRef.current = null;
+    }
+    setAudioLevels([]);
+
+    // 4. Stop sending any more microphone audio to Deepgram & clear buffers (do NOT start another STT turn)
+    isWsStreamingRef.current = false;
+    wsPendingQueueRef.current = [];
+    recordedBuffersRef.current = [];
+    preRollBuffersRef.current = [];
+    isSpeechTurnActiveRef.current = false;
+    speechDetectedRef.current = false;
+    if (sttSocketRef.current) {
+      try {
+        if (sttSocketRef.current.readyState === WebSocket.OPEN) {
+          sttSocketRef.current.close();
+        }
+      } catch (_) {}
+      sttSocketRef.current = null;
+    }
+
+    // 5. If assistant is actively speaking or playing TTS, let it finish naturally out loud, then go idle.
+    // If assistant is not speaking, transition immediately to idle.
+    const isAssistantActivelySpeaking =
+      isTTSPlaying ||
+      voiceStateRef.current === "speaking" ||
+      (sentenceAudioQueueRef.current?.isCurrentlyPlaying() ?? false);
+
+    if (isAssistantActivelySpeaking) {
+      console.log(
+        "[VoiceCopilot] Finish Speaking clicked: mic/VAD stopped immediately; permitting active assistant speech to finish before idling."
+      );
+    } else {
+      cancelActiveTurn();
+      if (sentenceAudioQueueRef.current) {
+        try {
+          sentenceAudioQueueRef.current.bargeIn();
+        } catch (_) {}
+      }
+      stopAllAudioPlayback();
+      setVoiceState("idle");
+      voiceStateRef.current = "idle";
+      setProcessingStage(null);
+      setIsTTSPlaying(false);
+      isVoicePipelineActiveRef.current = false;
+      console.log("[VoiceCopilot] Finish Speaking clicked: mic/VAD stopped immediately, transitioned to idle.");
+    }
+  }, [cancelActiveTurn, isTTSPlaying, stopAllAudioPlayback]);
+
+  // Start fresh voice assistant session (completely NEW conversation/session)
+  const startVoiceMode = useCallback(async () => {
+    if (isStartingSessionRef.current) return;
+    isStartingSessionRef.current = true;
+
+    try {
+      // Cancel any pending timers or speech from a prior session
+      if (autoListenTimeoutRef.current) {
+        clearTimeout(autoListenTimeoutRef.current);
+        autoListenTimeoutRef.current = null;
+      }
+      if (silenceTimerRef.current) {
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+      }
+      if (sentenceAudioQueueRef.current) {
+        try {
+          sentenceAudioQueueRef.current.bargeIn();
+        } catch (_) {}
+      }
+      if (ttsAudioRef.current) {
+        try {
+          ttsAudioRef.current.pause();
+          ttsAudioRef.current.currentTime = 0;
+        } catch (_) {}
+      }
+      setIsTTSPlaying(false);
+      isVoicePipelineActiveRef.current = false;
+
+      cancelActiveTurn();
+      isContinuousModeRef.current = true;
+      setElapsedSeconds(0);
+
+      // Completely NEW conversation / session
+      setConversationMessages([]);
       activeLeadIdRef.current = null;
       currentLeadRef.current = null;
       setExtractedLead(null);
       setSaveLeadSuccess(null);
+      setTranscript(null);
+      setAssistantResponseText(null);
       setSessionTurnCount(0);
-      const initialPrompt = selectedLanguage === "hi"
-        ? "नमस्ते! कृपया आपका शुभ नाम बताइए?"
-        : selectedLanguage === "mr"
-        ? "नमस्कार! कृपया आपले नाव सांगा?"
-        : "Hello! May I have your name, please?";
-      setAssistantResponseText(initialPrompt);
+      turnIdRef.current = 0;
+      handledFinalTurnsRef.current.clear();
+
+      // Start session timer
+      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = setInterval(() => {
+        setElapsedSeconds((prev) => prev + 1);
+      }, 1000);
+
+      setVoiceState("listening");
+      voiceStateRef.current = "listening";
+      await startListeningTurn();
+    } finally {
+      isStartingSessionRef.current = false;
     }
-
-    // Start session timer
-    if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-    timerIntervalRef.current = setInterval(() => {
-      setElapsedSeconds((prev) => prev + 1);
-    }, 1000);
-
-    startListeningTurn();
-  }, [cancelActiveTurn, selectedLanguage, startListeningTurn]);
+  }, [cancelActiveTurn, startListeningTurn]);
 
   // Stop continuous voice assistant session
   const stopVoiceMode = useCallback(() => {
     isContinuousModeRef.current = false;
+    if (sttSocketRef.current) {
+      try {
+        sttSocketRef.current.send(JSON.stringify({ type: "CloseStream" }));
+        sttSocketRef.current.close();
+      } catch (_) {}
+      sttSocketRef.current = null;
+    }
     cancelActiveTurn();
 
     if (timerIntervalRef.current) {
@@ -1507,6 +2648,21 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
+    }
+    primarySpeakerProfileRef.current = {
+      dominantBin: 5,
+      centroid: 6.0,
+      formantRatio: 1.5,
+      peakProminence: 2.0,
+      sampleCount: 0,
+      isCalibrated: false,
+    };
+    if (audioWorkletNodeRef.current) {
+      try {
+        audioWorkletNodeRef.current.port.onmessage = null;
+        audioWorkletNodeRef.current.disconnect();
+      } catch (_) {}
+      audioWorkletNodeRef.current = null;
     }
     if (scriptProcessorRef.current) {
       try {
@@ -1589,167 +2745,12 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
     currentLeadRef.current = null;
     setExtractedLead(null);
     setTranscript(null);
+    setConversationMessages([]);
     setSaveLeadSuccess(null);
     setSessionTurnCount(0);
     setElapsedSeconds(0);
     setErrorMessage(null);
-
-    const initialPrompt = selectedLanguage === "hi"
-      ? "नमस्ते! कृपया आपका शुभ नाम बताइए?"
-      : selectedLanguage === "mr"
-      ? "नमस्कार! कृपया आपले नाव सांगा?"
-      : "Hello! May I have your name, please?";
-    setAssistantResponseText(initialPrompt);
-  };
-
-  // Run simulation preset directly
-  const runSimulationTurn = async (presetText: string, presetLang: string) => {
-    cancelActiveTurn();
-    const currentTurnId = ++turnIdRef.current;
-    isVoicePipelineActiveRef.current = true;
-    setVoiceState("processing");
-    setProcessingStage("extracting");
-    setTranscript(presetText);
-    setDetectedLanguage(presetLang.toLowerCase());
-
-    const isUpdate = activeLeadIdRef.current !== null;
-    const targetLang = presetLang.toLowerCase();
-
-    try {
-      const playSimulationAudio = (textToPlay: string, lang: string) => {
-        setVoiceState("speaking");
-        setProcessingStage("speaking");
-        setIsTTSPlaying(true);
-
-        if (!ttsAudioRef.current && typeof window !== "undefined") {
-          ttsAudioRef.current = new Audio();
-        }
-
-        const audioPlayer = ttsAudioRef.current;
-        if (!audioPlayer) {
-          setIsTTSPlaying(false);
-          setVoiceState("idle");
-          setProcessingStage(null);
-          return;
-        }
-
-        if (!sentenceAudioQueueRef.current) {
-          sentenceAudioQueueRef.current = new SentenceAudioQueue(audioPlayer, {}, audioContextRef.current, {
-            module: "module1",
-            speaker: "simran",
-          });
-        }
-        if (sentenceAudioQueueRef.current) {
-          sentenceAudioQueueRef.current.setOptions({ module: "module1", speaker: "simran" });
-          if (audioContextRef.current) {
-            sentenceAudioQueueRef.current.setAudioContext(audioContextRef.current);
-          }
-        }
-
-        sentenceAudioQueueRef.current.updateCallbacks({
-          onSentenceStart: () => {
-            if (turnIdRef.current !== currentTurnId) return;
-            setVoiceState("speaking");
-            setIsTTSPlaying(true);
-          },
-          onQueueComplete: () => {
-            if (turnIdRef.current === currentTurnId) {
-              setIsTTSPlaying(false);
-              setVoiceState("idle");
-              setProcessingStage(null);
-            }
-          },
-          onError: () => {
-            if (turnIdRef.current === currentTurnId) {
-              setIsTTSPlaying(false);
-              setVoiceState("idle");
-              setProcessingStage(null);
-            }
-          },
-        });
-
-        sentenceAudioQueueRef.current.startNewTurn(currentTurnId);
-
-        const tokenizer = new SentenceTokenizer();
-        const sentences = tokenizer.feed(textToPlay);
-        const trailing = tokenizer.flush();
-        if (trailing) sentences.push(trailing);
-        if (sentences.length === 0 && textToPlay.trim()) sentences.push(textToPlay.trim());
-
-        for (const s of sentences) {
-          sentenceAudioQueueRef.current.enqueueSentence(s, lang);
-        }
-        sentenceAudioQueueRef.current.markStreamComplete();
-      };
-
-      // Check greeting preset
-      if (isGreetingOnly(presetText)) {
-        const greetingSpoken = getNaturalGreeting(targetLang);
-        setAssistantResponseText(greetingSpoken);
-        playSimulationAudio(greetingSpoken, targetLang);
-        return;
-      }
-
-      const extractRes = await fetch("/api/extract-lead", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          transcript: presetText,
-          existing_lead: currentLeadRef.current || undefined,
-          language: targetLang,
-        }),
-      });
-
-      const extractData = await extractRes.json();
-      const updatedLeadData: ExtractedLead = extractData.lead;
-
-      // Persistence
-      let savedRecord: ExtractedLead = updatedLeadData;
-      if (activeLeadIdRef.current !== null) {
-        const targetId = activeLeadIdRef.current;
-        const updateRes = await fetch("/api/leads", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: targetId, ...updatedLeadData }),
-        });
-        const updateData = await updateRes.json();
-        savedRecord = updateData.lead || { id: targetId, ...updatedLeadData };
-        setSaveLeadSuccess({
-          id: targetId,
-          message: `Lead #${targetId} successfully updated in PostgreSQL database!`,
-          isUpdate: true,
-        });
-      } else {
-        const createRes = await fetch("/api/leads", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(updatedLeadData),
-        });
-        const createData = await createRes.json();
-        savedRecord = createData.lead;
-        activeLeadIdRef.current = savedRecord.id || 1;
-        setSaveLeadSuccess({
-          id: savedRecord.id || 1,
-          message: `Lead #${savedRecord.id || 1} successfully saved to PostgreSQL database!`,
-          isUpdate: false,
-        });
-      }
-
-      currentLeadRef.current = savedRecord;
-      setExtractedLead(savedRecord);
-      setSessionTurnCount((prev) => prev + 1);
-
-      // Voice response
-      const spokenText = generateSpokenResponseText(savedRecord, presetLang.toLowerCase(), isUpdate);
-      setAssistantResponseText(spokenText);
-      playSimulationAudio(spokenText, targetLang);
-    } catch (err: any) {
-      console.error("Simulation error:", err);
-      setErrorMessage(err?.message || "Simulation failed.");
-      setVoiceState("idle");
-    } finally {
-      isVoicePipelineActiveRef.current = false;
-    }
+    setAssistantResponseText(null);
   };
 
   const copyToClipboard = (text: string, fieldKey: string) => {
@@ -1759,565 +2760,346 @@ export default function LiveCallVoiceCopilot({ onAudioRecorded, onLeadSaved }: L
   };
 
   return (
-    <div className="card overflow-hidden w-full">
-      {/* Top Header */}
-      <div className="card-header flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-[var(--radius)] bg-[var(--accent-soft)] text-[var(--accent)] flex items-center justify-center shrink-0">
-            {voiceState === "listening" ? (
-              <Radio className="h-4 w-4 text-[var(--danger)] animate-pulse" />
-            ) : voiceState === "speaking" ? (
-              <Volume2 className="h-4 w-4 text-[var(--accent)] animate-bounce" />
-            ) : voiceState === "processing" ? (
-              <Loader2 className="h-4 w-4 text-[var(--warning)] animate-spin" />
-            ) : (
-              <Mic className="h-4 w-4" />
-            )}
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="card-title">Live Call Voice Copilot</span>
-
-              {/* Dynamic Status Badge */}
-              {voiceState === "idle" && (
-                <span className="status-pill status-pill-neutral">Standby · Voice Mode Ready</span>
-              )}
-              {voiceState === "listening" && (
-                <span className="status-pill status-pill-danger flex items-center gap-1.5">
-                  <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-ping" />
-                  Listening Live · {formatTime(elapsedSeconds)}
-                </span>
-              )}
-              {voiceState === "processing" && (
-                <span className="status-pill status-pill-warning flex items-center gap-1.5">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  {processingStage === "transcribing"
-                    ? "Deepgram STT..."
-                    : processingStage === "extracting"
-                    ? "AI Lead Extraction..."
-                    : "Saving to PostgreSQL..."}
-                </span>
-              )}
-              {voiceState === "speaking" && (
-                <span className="status-pill status-pill-success flex items-center gap-1.5">
-                  <Volume2 className="h-3 w-3 animate-pulse" />
-                  Speaking Confirmation
-                </span>
-              )}
-
-              {/* Active Lead ID Indicator */}
-              {activeLeadIdRef.current && (
-                <span className="badge badge-primary font-mono text-[10px]">
-                  Lead #{activeLeadIdRef.current} Active
-                </span>
-              )}
-            </div>
-            <p className="card-subtitle">
-              Continuous Voice Assistant: Speaks naturally → extracts facts → updates PostgreSQL lead without duplicates
-            </p>
-          </div>
-        </div>
-
-        {/* Right Header Navigation: Language Selector & Sub-Tabs */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Multilingual Selector */}
-          <div className="flex items-center gap-1 p-0.5 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)] text-xs">
-            <button
-              onClick={() => setSelectedLanguage("auto")}
-              className={`px-2 py-1 rounded-[var(--radius-sm)] transition-colors cursor-pointer ${
-                selectedLanguage === "auto"
-                  ? "bg-[var(--accent)] text-white font-medium"
-                  : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              }`}
-              title={`Auto Language Detection (Active: ${detectedLanguage.toUpperCase()})`}
-            >
-              Auto ({detectedLanguage.toUpperCase()})
-            </button>
-            <button
-              onClick={() => setSelectedLanguage("en")}
-              className={`px-2 py-1 rounded-[var(--radius-sm)] transition-colors cursor-pointer ${
-                selectedLanguage === "en"
-                  ? "bg-[var(--accent)] text-white font-medium"
-                  : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              }`}
-            >
-              EN
-            </button>
-            <button
-              onClick={() => setSelectedLanguage("hi")}
-              className={`px-2 py-1 rounded-[var(--radius-sm)] transition-colors cursor-pointer ${
-                selectedLanguage === "hi"
-                  ? "bg-[var(--accent)] text-white font-medium"
-                  : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              }`}
-            >
-              हिंदी
-            </button>
-            <button
-              onClick={() => setSelectedLanguage("mr")}
-              className={`px-2 py-1 rounded-[var(--radius-sm)] transition-colors cursor-pointer ${
-                selectedLanguage === "mr"
-                  ? "bg-[var(--accent)] text-white font-medium"
-                  : "text-[var(--ink-muted)] hover:text-[var(--ink)]"
-              }`}
-            >
-              मराठी
-            </button>
-          </div>
-
-          {/* Sub-Tab Switcher */}
-          <div className="flex items-center gap-1 p-1 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)]">
-            <button
-              onClick={() => setActiveSubTab("assistant")}
-              className={`btn btn-sm cursor-pointer gap-1.5 ${
-                activeSubTab === "assistant"
-                  ? "btn-primary"
-                  : "btn-secondary border-transparent bg-transparent"
-              }`}
-            >
-              <Mic className="h-3.5 w-3.5" />
-              <span>Voice Assistant</span>
-            </button>
-            <button
-              onClick={() => setActiveSubTab("simulation")}
-              className={`btn btn-sm cursor-pointer gap-1.5 ${
-                activeSubTab === "simulation"
-                  ? "btn-primary"
-                  : "btn-secondary border-transparent bg-transparent"
-              }`}
-            >
-              <Headphones className="h-3.5 w-3.5" />
-              <span>Call Presets</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Error Notice */}
+    <div className="w-full flex-1 flex flex-col min-h-0 h-full">
+      {/* Error Notice (if any audio/permissions error occurs) */}
       {errorMessage && (
-        <div className="m-4 p-3.5 rounded-[var(--radius)] bg-[var(--danger-soft)] border border-[var(--danger)]/30 flex items-start gap-2.5 text-xs text-[var(--danger)]">
-          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-          <div className="flex-1">
-            <span className="font-semibold text-white">Voice Assistant Notice: </span>
+        <div className="mb-4 p-3.5 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-between gap-3 text-xs text-rose-700 animate-in fade-in duration-150 shrink-0">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-500 shrink-0" />
             <span>{errorMessage}</span>
           </div>
           <button
             onClick={() => setErrorMessage(null)}
-            className="text-[var(--ink-muted)] hover:text-white text-xs font-mono px-1.5 cursor-pointer"
+            className="text-rose-400 hover:text-rose-600 font-bold px-2 py-0.5 cursor-pointer"
           >
             &times;
           </button>
         </div>
       )}
 
-      {/* SUB-TAB 1: CONTINUOUS VOICE ASSISTANT */}
-      {activeSubTab === "assistant" && (
-        <div className="card-body space-y-6">
-          {/* Central Interactive Voice Orb Card */}
-          <div className="p-8 rounded-[var(--radius-lg)] bg-[var(--surface-2)] border border-[var(--border)] flex flex-col items-center justify-center text-center relative overflow-hidden">
-            {/* Background Glow effects */}
-            {voiceState === "listening" && (
-              <div className="absolute inset-0 bg-red-500/10 pointer-events-none animate-pulse" />
-            )}
-            {voiceState === "speaking" && (
-              <div className="absolute inset-0 bg-[var(--accent-soft)] pointer-events-none animate-pulse" />
-            )}
+      {/* Main Unified 2-Column Card with Clear Vertical Divider */}
+      <div className="w-full flex-1 flex flex-col bg-white rounded-3xl border border-slate-200/80 shadow-[0_2px_16px_-4px_rgba(0,0,0,0.04)] overflow-hidden h-full min-h-0">
+        <div className="flex flex-col lg:flex-row flex-1 min-h-0 h-full divide-y lg:divide-y-0 lg:divide-x divide-slate-200/80">
+          {/* ===================================================================
+              LEFT 40%: Dedicated Large Microphone & Voice Interaction Panel
+              =================================================================== */}
+          <div className="w-full lg:w-[40%] p-6 sm:p-8 flex flex-col justify-between items-center text-center relative bg-white shrink-0 overflow-y-auto">
+            {/* Top Status Pill */}
+            <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full text-xs font-semibold bg-[#e6f7f2] text-teal-800 border border-teal-200/40 shrink-0">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  voiceState === "listening"
+                    ? "bg-emerald-500 animate-ping"
+                    : voiceState === "speaking"
+                    ? "bg-teal-500 animate-pulse"
+                    : "bg-emerald-500"
+                }`}
+              />
+              <span>
+                {voiceState === "listening"
+                  ? "Listening..."
+                  : voiceState === "processing"
+                  ? "Processing..."
+                  : voiceState === "speaking"
+                  ? "Speaking..."
+                  : "Ready"}
+              </span>
+            </div>
 
-            {/* Interactive Voice Orb */}
-            <div className="relative mb-5 z-10">
+            {/* Center: Concentric Circles with Large Microphone Button */}
+            <div className="my-auto py-6 sm:py-8 flex flex-col items-center justify-center">
+              <div className="relative flex items-center justify-center">
+                {/* Outermost ring */}
+                <div
+                  className={`w-56 h-56 sm:w-64 sm:h-64 lg:w-72 lg:h-72 rounded-full bg-[#e6f7f2] flex items-center justify-center transition-all duration-300 ${
+                    voiceState === "listening" ? "scale-105" : ""
+                  }`}
+                >
+                  {/* Middle ring */}
+                  <div
+                    className={`w-40 h-40 sm:w-48 sm:h-48 lg:w-52 lg:h-52 rounded-full bg-[#bfead8] flex items-center justify-center transition-all duration-300 ${
+                      voiceState === "listening" ? "scale-105" : ""
+                    }`}
+                  >
+                    {/* Inner circular button */}
+                    <button
+                      onClick={() => {
+                        if (voiceState === "idle") {
+                          startVoiceMode();
+                        } else {
+                          finishSpeakingTurn();
+                        }
+                      }}
+                      disabled={voiceState === "processing"}
+                      className="w-24 h-24 sm:w-28 sm:h-28 lg:w-32 lg:h-32 rounded-full bg-[#00897b] hover:bg-[#00796b] text-white flex items-center justify-center shadow-lg shadow-teal-700/25 transition-transform hover:scale-105 active:scale-95 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                      title={
+                        voiceState === "idle"
+                          ? "Tap to Speak"
+                          : "Finish Speaking"
+                      }
+                    >
+                      <Mic className="w-10 h-10 sm:w-12 sm:h-12 text-white stroke-[2.2]" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Title & Subtext */}
+              <h3 className="text-base sm:text-lg lg:text-xl font-bold text-slate-900 mt-6 sm:mt-7 mb-1">
+                Speak naturally
+              </h3>
+              <p className="text-xs sm:text-sm text-slate-400 max-w-xs leading-relaxed">
+                Your voice will be converted to text and processed in real time.
+              </p>
+            </div>
+
+            {/* Bottom Pill Container */}
+            <div className="w-full rounded-2xl bg-[#e6f7f2] border border-teal-100/70 p-3 sm:p-3.5 flex items-center gap-3 text-left shrink-0">
+              <div className="text-[#00897b] flex items-center shrink-0">
+                <WaveformIcon className="w-5 h-5 text-[#00897b]" />
+              </div>
+              <span className="text-xs sm:text-sm font-medium text-slate-700 truncate">
+                {voiceState === "listening" && transcript
+                  ? transcript
+                  : voiceState === "listening"
+                  ? "Listening for your voice..."
+                  : voiceState === "speaking"
+                  ? "Assistant is speaking..."
+                  : voiceState === "processing"
+                  ? "Processing speech..."
+                  : "Tap to Speak to start"}
+              </span>
+            </div>
+          </div>
+
+          {/* ===================================================================
+              RIGHT 60%: Dedicated Conversation Panel (Starts Empty)
+              =================================================================== */}
+          <div className="w-full lg:w-[60%] flex flex-col flex-1 min-h-0 bg-white self-stretch">
+            {/* Header: Audio Waveform + Conversation Title & Language Selector */}
+            <div className="px-6 sm:px-8 py-4 sm:py-5 flex items-center justify-between border-b border-slate-100 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="text-[#00897b] flex items-center">
+                  <WaveformIcon className="w-4 h-4 text-[#00897b]" />
+                </div>
+                <span className="font-bold text-slate-900 text-sm sm:text-base">
+                  Conversation
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 uppercase">
+                  {(selectedLanguage !== "auto" ? selectedLanguage : (detectedLanguage || "en")).toUpperCase()}
+                </span>
+              </div>
+
+              {/* Language Selector Dropdown */}
+              <div className="relative" ref={languageMenuRef}>
+                <button
+                  onClick={() => setIsLanguageMenuOpen(!isLanguageMenuOpen)}
+                  className="rounded-full border border-slate-200/90 px-3.5 py-1 bg-white hover:bg-slate-50 flex items-center gap-1.5 text-xs font-semibold text-slate-700 cursor-pointer shadow-2xs transition-colors"
+                  title="Select Language"
+                >
+                  <Globe className="w-3.5 h-3.5 text-slate-400" />
+                  <span>
+                    {selectedLanguage === "auto" ? "Auto" : selectedLanguage.toUpperCase()}
+                  </span>
+                  <ChevronDown className="w-3 h-3 text-slate-400" />
+                </button>
+
+                {isLanguageMenuOpen && (
+                  <div className="absolute right-0 top-full mt-1.5 w-36 rounded-xl bg-white border border-slate-100 shadow-lg py-1 z-30 text-xs">
+                    <button
+                      onClick={() => {
+                        isManualLanguageSelectionRef.current = true;
+                        setSelectedLanguage("en");
+                        setDetectedLanguage("en");
+                        detectedLanguageRef.current = "en";
+                        setIsLanguageMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center justify-between cursor-pointer ${
+                        selectedLanguage === "en"
+                          ? "font-bold text-teal-700 bg-teal-50/50"
+                          : "text-slate-700"
+                      }`}
+                    >
+                      <span>English (EN)</span>
+                      {selectedLanguage === "en" && (
+                        <Check className="w-3 h-3 text-teal-600" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => {
+                        isManualLanguageSelectionRef.current = true;
+                        setSelectedLanguage("hi");
+                        setDetectedLanguage("hi");
+                        detectedLanguageRef.current = "hi";
+                        setIsLanguageMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center justify-between cursor-pointer ${
+                        selectedLanguage === "hi"
+                          ? "font-bold text-teal-700 bg-teal-50/50"
+                          : "text-slate-700"
+                      }`}
+                    >
+                      <span>हिंदी (Hindi)</span>
+                      {selectedLanguage === "hi" && (
+                        <Check className="w-3 h-3 text-teal-600" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => {
+                        isManualLanguageSelectionRef.current = true;
+                        setSelectedLanguage("mr");
+                        setDetectedLanguage("mr");
+                        detectedLanguageRef.current = "mr";
+                        setIsLanguageMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center justify-between cursor-pointer ${
+                        selectedLanguage === "mr"
+                          ? "font-bold text-teal-700 bg-teal-50/50"
+                          : "text-slate-700"
+                      }`}
+                    >
+                      <span>मराठी (Marathi)</span>
+                      {selectedLanguage === "mr" && (
+                        <Check className="w-3 h-3 text-teal-600" />
+                      )}
+                    </button>
+                    <button
+                      onClick={() => {
+                        isManualLanguageSelectionRef.current = false;
+                        setSelectedLanguage("auto");
+                        setIsLanguageMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-2 text-left hover:bg-slate-50 flex items-center justify-between cursor-pointer ${
+                        selectedLanguage === "auto"
+                          ? "font-bold text-teal-700 bg-teal-50/50"
+                          : "text-slate-700"
+                      }`}
+                    >
+                      <span>Auto Detect</span>
+                      {selectedLanguage === "auto" && (
+                        <Check className="w-3 h-3 text-teal-600" />
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Conversation Messages Container - Starts EMPTY, populates from real runtime data */}
+            <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto px-6 sm:px-8 py-5 space-y-4">
+              {conversationMessages.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 py-12">
+                  <p className="text-xs sm:text-sm font-normal">
+                    No conversation messages yet. Tap to Speak to start.
+                  </p>
+                </div>
+              ) : (
+                conversationMessages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={`flex w-full ${
+                      msg.sender === "user" ? "justify-end" : "justify-start"
+                    } animate-in fade-in duration-200`}
+                  >
+                    {msg.sender === "user" ? (
+                      /* User Message Bubble */
+                      <div className="max-w-[85%] sm:max-w-[80%] rounded-2xl bg-[#e6f7f2] border border-teal-100/70 p-4 text-left shadow-2xs">
+                        <div className="flex items-center justify-between gap-4 mb-1.5">
+                          <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 rounded-full bg-[#00897b] text-white flex items-center justify-center shrink-0">
+                              <User className="w-3.5 h-3.5" />
+                            </div>
+                            <span className="font-semibold text-xs text-slate-800">
+                              You
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-400 font-normal">
+                            {msg.timestamp}
+                          </span>
+                        </div>
+                        <p className="text-xs sm:text-sm text-slate-800 leading-relaxed font-normal">
+                          {msg.text}
+                        </p>
+                      </div>
+                    ) : (
+                      /* Assistant Message Bubble */
+                      <div className="max-w-[85%] sm:max-w-[85%] rounded-2xl bg-[#f0f4ff] border border-indigo-50 p-4 text-left shadow-2xs">
+                        <div className="flex items-center justify-between gap-4 mb-1.5">
+                          <div className="flex items-center gap-2">
+                            <div className="w-6 h-6 rounded-full bg-[#5c7cfa] text-white flex items-center justify-center shrink-0">
+                              <Bot className="w-3.5 h-3.5" />
+                            </div>
+                            <span className="font-semibold text-xs text-slate-800">
+                              Assistant
+                            </span>
+                            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 uppercase">
+                              {msg.language || getMessageLanguage(msg.text, detectedLanguage)}
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-400 font-normal">
+                            {msg.timestamp}
+                          </span>
+                        </div>
+                        <p className="text-xs sm:text-sm text-slate-700 leading-relaxed font-normal">
+                          {msg.text}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Bottom Bar: Status on Left, Primary Action Button on Right (Pinned at bottom) */}
+            <div className="shrink-0 mt-auto bg-white border-t border-slate-100 px-6 sm:px-8 py-4 flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    voiceState === "listening"
+                      ? "bg-emerald-500 animate-ping"
+                      : voiceState === "speaking"
+                      ? "bg-teal-500 animate-pulse"
+                      : "bg-emerald-500"
+                  }`}
+                />
+                <span>
+                  {voiceState === "listening"
+                    ? "Listening..."
+                    : voiceState === "processing"
+                    ? "Processing..."
+                    : voiceState === "speaking"
+                    ? "Assistant is speaking..."
+                    : "Ready for your next question"}
+                </span>
+              </div>
+
               <button
                 onClick={() => {
                   if (voiceState === "idle") {
                     startVoiceMode();
-                  } else if (voiceState === "listening") {
+                  } else {
                     finishSpeakingTurn();
-                  } else if (voiceState === "speaking") {
-                    // Instant Barge-In: interrupt assistant speech and resume listening immediately
-                    stopAllAudioPlayback();
-                    if (isContinuousModeRef.current) {
-                      setVoiceState("listening");
-                      startListeningTurn();
-                    } else {
-                      setVoiceState("idle");
-                    }
                   }
                 }}
                 disabled={voiceState === "processing"}
-                className={`relative w-24 h-24 sm:w-28 sm:h-28 rounded-full flex items-center justify-center transition-all duration-300 shadow-xl cursor-pointer ${
-                  voiceState === "idle"
-                    ? "bg-gradient-to-tr from-[var(--accent)] to-[var(--purple)] hover:scale-105"
+                className="rounded-full px-5 py-2.5 bg-[#00897b] hover:bg-[#00796b] text-white text-xs sm:text-sm font-semibold flex items-center gap-2 shadow-xs transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Mic className="w-4 h-4 text-white" />
+                <span>
+                  {voiceState === "idle"
+                    ? "Tap to Speak"
                     : voiceState === "listening"
-                    ? "bg-gradient-to-tr from-red-600 to-pink-600 animate-pulse scale-105 ring-4 ring-red-500/30"
-                    : voiceState === "processing"
-                    ? "bg-gradient-to-tr from-amber-600 to-yellow-500 ring-4 ring-amber-500/30"
-                    : "bg-gradient-to-tr from-[var(--accent)] to-teal-500 scale-105 ring-4 ring-[var(--accent)]/30"
-                }`}
-                title={
-                  voiceState === "idle"
-                    ? "Click to start Continuous Voice Mode"
-                    : voiceState === "listening"
-                    ? "Click to finish speaking turn immediately"
+                    ? "Finish Speaking"
                     : voiceState === "speaking"
-                    ? "Click to interrupt assistant (Barge-In)"
-                    : undefined
-                }
-              >
-                {voiceState === "idle" && <Mic className="h-10 w-10 text-white" />}
-                {voiceState === "listening" && <Radio className="h-10 w-10 text-white animate-pulse" />}
-                {voiceState === "processing" && <Loader2 className="h-10 w-10 text-white animate-spin" />}
-                {voiceState === "speaking" && <Volume2 className="h-10 w-10 text-white animate-bounce" />}
-              </button>
-
-              {/* Pulsing halo rings when listening */}
-              {voiceState === "listening" && (
-                <div className="absolute inset-0 rounded-full border-2 border-red-500/40 animate-ping pointer-events-none" />
-              )}
-            </div>
-
-            {/* Status Headings & Instructions */}
-            <h3 className="text-base font-bold text-[var(--ink)] mb-1 z-10">
-              {voiceState === "idle" && "Continuous Voice Assistant Standby"}
-              {voiceState === "listening" && "Listening for your voice..."}
-              {voiceState === "processing" && (
-                processingStage === "transcribing"
-                  ? "Transcribing Speech (Deepgram)..."
-                  : processingStage === "extracting"
-                  ? "Extracting Lead Facts (OpenRouter)..."
-                  : "Saving / Updating PostgreSQL Lead..."
-              )}
-              {voiceState === "speaking" && "Assistant Speaking Confirmation..."}
-            </h3>
-
-            <p className="text-xs text-[var(--ink-soft)] max-w-md z-10">
-              {voiceState === "idle" &&
-                "Click the orb once to start. Speak naturally about prospect details, loan types, amounts, or updates. Automatically listens again after each answer."}
-              {voiceState === "listening" &&
-                "Speak clearly into your microphone. When you pause or finish, the assistant automatically captures your speech and updates the lead."}
-              {voiceState === "processing" &&
-                "Understanding new speech details, updating existing lead facts, and saving directly to PostgreSQL database."}
-              {voiceState === "speaking" &&
-                "Assistant is speaking confirmation. Microphone is muted during playback to prevent feedback. Will auto-listen when done."}
-            </p>
-
-            {/* Waveform visualizer */}
-            <div className="w-full max-w-md h-12 bg-[var(--surface)] rounded-[var(--radius)] border border-[var(--border)] p-2 flex items-center justify-center gap-1.5 mt-5 z-10">
-              {voiceState === "listening" ? (
-                audioLevels.map((level, idx) => (
-                  <div
-                    key={idx}
-                    className="w-1.5 sm:w-2 bg-gradient-to-t from-[var(--accent)] to-[var(--purple)] rounded-full transition-all duration-75"
-                    style={{ height: `${level}%` }}
-                  />
-                ))
-              ) : voiceState === "speaking" ? (
-                audioLevels.map((level, idx) => (
-                  <div
-                    key={idx}
-                    className="w-1.5 sm:w-2 bg-[var(--success)] rounded-full transition-all duration-75"
-                    style={{ height: `${Math.min(100, Math.max(20, (level * 1.5)))}%` }}
-                  />
-                ))
-              ) : (
-                audioLevels.map((_, idx) => (
-                  <div
-                    key={idx}
-                    className="w-1.5 sm:w-2 bg-[var(--border)] rounded-full"
-                    style={{ height: `${16 + (idx % 3) * 6}%` }}
-                  />
-                ))
-              )}
-            </div>
-
-            {/* Action Buttons Row */}
-            <div className="flex flex-wrap items-center justify-center gap-3 mt-5 z-10">
-              {voiceState === "idle" ? (
-                <button
-                  onClick={startVoiceMode}
-                  className="btn btn-gradient btn-lg cursor-pointer gap-2"
-                >
-                  <Mic className="h-4 w-4" />
-                  <span>Start Continuous Voice Mode</span>
-                </button>
-              ) : (
-                <>
-                  {voiceState === "listening" && (
-                    <button
-                      onClick={finishSpeakingTurn}
-                      className="btn btn-secondary btn-sm cursor-pointer gap-1.5"
-                    >
-                      <Square className="h-3.5 w-3.5 fill-current" />
-                      <span>Finish Speaking Now</span>
-                    </button>
-                  )}
-                  <button
-                    onClick={stopVoiceMode}
-                    className="btn btn-danger btn-sm cursor-pointer gap-1.5"
-                  >
-                    <Square className="h-3.5 w-3.5" />
-                    <span>Stop Voice Mode</span>
-                  </button>
-                  <button
-                    onClick={resetLeadSession}
-                    className="btn btn-secondary btn-sm cursor-pointer gap-1.5"
-                    title="Start a new prospect session and clear active lead ID"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                    <span>New Lead (Reset)</span>
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Assistant Voice Response Bubble (Shows confirmation speech) */}
-          {assistantResponseText && (
-            <div className="rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)] p-4 space-y-2 animate-in fade-in duration-200">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Volume2 className="h-4 w-4 text-[var(--accent)]" />
-                  <span className="text-xs font-bold text-[var(--ink)]">Assistant Confirmation Response</span>
-                  {isTTSPlaying && (
-                    <span className="status-pill status-pill-success text-[10px] animate-pulse">
-                      Speaking Live
-                    </span>
-                  )}
-                </div>
-                <span className="badge badge-primary font-mono text-[10px]">
-                  {detectedLanguage.toUpperCase()}
+                    ? "Finish Speaking"
+                    : "Processing..."}
                 </span>
-              </div>
-              <p className="text-xs sm:text-sm text-[var(--ink)] leading-relaxed bg-[var(--surface)] p-3 rounded-[var(--radius)] border border-[var(--border)]">
-                "{assistantResponseText}"
-              </p>
+              </button>
             </div>
-          )}
-
-          {/* Live Speech Transcript Bubble */}
-          {transcript && (
-            <div className="rounded-[var(--radius)] bg-[var(--surface)] border border-[var(--border)] p-4 space-y-2">
-              <div className="flex items-center justify-between border-b border-[var(--border)] pb-2">
-                <div className="flex items-center gap-2">
-                  <FileText className="h-4 w-4 text-[var(--success)]" />
-                  <span className="text-xs font-semibold text-[var(--ink)]">Latest User Speech (Turn #{sessionTurnCount})</span>
-                  <span className="badge badge-secondary font-mono text-[10px]">
-                    {detectedLanguage.toUpperCase()}
-                  </span>
-                </div>
-                <button
-                  onClick={() => copyToClipboard(transcript, "transcript")}
-                  className="btn btn-secondary btn-sm text-[10px] gap-1 cursor-pointer"
-                >
-                  {copiedField === "transcript" ? (
-                    <>
-                      <Check className="h-3 w-3 text-[var(--success)]" />
-                      <span>Copied</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="h-3 w-3" />
-                      <span>Copy</span>
-                    </>
-                  )}
-                </button>
-              </div>
-              <p className="text-xs text-[var(--ink-soft)] italic select-text">
-                "{transcript}"
-              </p>
-            </div>
-          )}
-
-          {/* STRUCTURED LEAD CARD (Live in PostgreSQL) */}
-          {extractedLead && (
-            <div className="rounded-[var(--radius-lg)] bg-[var(--surface)] border border-[var(--border)] p-5 space-y-4 shadow-sm animate-in fade-in duration-200">
-              {/* Header with DB Status */}
-              <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[var(--border)]">
-                <div className="flex items-center gap-2.5">
-                  <div className="h-8 w-8 rounded-[var(--radius)] bg-[var(--accent-soft)] flex items-center justify-center text-[var(--accent)] shrink-0">
-                    <Database className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-bold text-[var(--ink)]">
-                        {extractedLead.name ? `${extractedLead.name}'s Lead Details` : "Active Lead Record"}
-                      </span>
-                      {saveLeadSuccess && (
-                        <span className="status-pill status-pill-success text-[10px]">
-                          {saveLeadSuccess.isUpdate ? "Updated in PostgreSQL" : "Saved in PostgreSQL"} (Lead #{saveLeadSuccess.id})
-                        </span>
-                      )}
-                    </div>
-                    <span className="text-[11px] text-[var(--ink-muted)]">
-                      {activeLeadIdRef.current
-                        ? `PostgreSQL Lead #${activeLeadIdRef.current} · Multi-turn updates accumulate to this record`
-                        : "Validated with Pydantic and ready for CRM integration"}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => copyToClipboard(JSON.stringify(extractedLead, null, 2), "lead_json")}
-                    className="btn btn-secondary btn-sm gap-1.5 cursor-pointer text-xs"
-                    title="Copy Lead as JSON"
-                  >
-                    {copiedField === "lead_json" ? (
-                      <>
-                        <Check className="h-3.5 w-3.5 text-[var(--success)]" />
-                        <span className="text-[var(--success)]">JSON Copied</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-3.5 w-3.5" />
-                        <span>Copy JSON</span>
-                      </>
-                    )}
-                  </button>
-                  <button
-                    onClick={resetLeadSession}
-                    className="btn btn-secondary btn-sm gap-1.5 cursor-pointer text-xs"
-                    title="Finish this lead and start a new prospect"
-                  >
-                    <UserCheck className="h-3.5 w-3.5 text-[var(--accent)]" />
-                    <span>New Lead</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* 9 Standard Lead Fields Grid */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                {/* 1. Name */}
-                <div className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)]">
-                  <span className="text-[10px] text-[var(--ink-muted)] uppercase font-semibold flex items-center gap-1.5 mb-1">
-                    <UserCheck className="h-3 w-3 text-[var(--accent)]" />
-                    Prospect Name
-                  </span>
-                  <span className="text-xs font-bold text-[var(--ink)] block truncate">
-                    {extractedLead.name || <span className="text-[var(--ink-muted)] italic font-normal">Pending mention...</span>}
-                  </span>
-                </div>
-
-                {/* 2. Company & Role */}
-                <div className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)]">
-                  <span className="text-[10px] text-[var(--ink-muted)] uppercase font-semibold flex items-center gap-1.5 mb-1">
-                    <Building className="h-3 w-3 text-[var(--purple)]" />
-                    Company &amp; Role
-                  </span>
-                  <span className="text-xs font-semibold text-[var(--ink)] block truncate">
-                    {[extractedLead.role, extractedLead.company].filter(Boolean).join(" at ") || (
-                      <span className="text-[var(--ink-muted)] italic font-normal">Pending mention...</span>
-                    )}
-                  </span>
-                </div>
-
-                {/* 3. Phone & Email */}
-                <div className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)]">
-                  <span className="text-[10px] text-[var(--ink-muted)] uppercase font-semibold flex items-center gap-1.5 mb-1">
-                    <Phone className="h-3 w-3 text-[var(--success)]" />
-                    Contact Info
-                  </span>
-                  <span className="text-xs font-mono text-[var(--ink)] block truncate">
-                    {[extractedLead.phone, extractedLead.email].filter(Boolean).join(" · ") || (
-                      <span className="text-[var(--ink-muted)] italic font-normal font-sans">Pending mention...</span>
-                    )}
-                  </span>
-                </div>
-
-                {/* 4. Loan Type */}
-                <div className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)]">
-                  <span className="text-[10px] text-[var(--ink-muted)] uppercase font-semibold flex items-center gap-1.5 mb-1">
-                    <Briefcase className="h-3 w-3 text-[var(--accent)]" />
-                    Loan Type
-                  </span>
-                  <span className="text-xs font-semibold text-[var(--accent)] block truncate">
-                    {extractedLead.loan_type || <span className="text-[var(--ink-muted)] italic font-normal">Pending mention...</span>}
-                  </span>
-                </div>
-
-                {/* 5. Loan Amount */}
-                <div className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)]">
-                  <span className="text-[10px] text-[var(--ink-muted)] uppercase font-semibold flex items-center gap-1.5 mb-1">
-                    <DollarSign className="h-3 w-3 text-[var(--success)]" />
-                    Loan Amount
-                  </span>
-                  <span className="text-xs font-bold text-[var(--success)] block">
-                    {extractedLead.loan_amount !== null && extractedLead.loan_amount !== undefined
-                      ? `$${extractedLead.loan_amount.toLocaleString()}`
-                      : <span className="text-[var(--ink-muted)] italic font-normal">Pending mention...</span>}
-                  </span>
-                </div>
-
-                {/* 6. Tenure */}
-                <div className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)]">
-                  <span className="text-[10px] text-[var(--ink-muted)] uppercase font-semibold flex items-center gap-1.5 mb-1">
-                    <Calendar className="h-3 w-3 text-[var(--warning)]" />
-                    Tenure
-                  </span>
-                  <span className="text-xs font-semibold text-[var(--ink)] block">
-                    {extractedLead.tenure_months
-                      ? `${extractedLead.tenure_months} months`
-                      : <span className="text-[var(--ink-muted)] italic font-normal">Pending mention...</span>}
-                  </span>
-                </div>
-              </div>
-
-              {/* 7. Notes */}
-              {extractedLead.notes && (
-                <div className="p-3 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)]">
-                  <span className="text-[10px] text-[var(--ink-muted)] uppercase font-semibold block mb-1">
-                    Sales Notes &amp; Intent
-                  </span>
-                  <p className="text-xs text-[var(--ink-soft)] leading-relaxed">
-                    {extractedLead.notes}
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* SUB-TAB 2: CALL PRESETS (Instant Multi-Turn Simulation) */}
-      {activeSubTab === "simulation" && (
-        <div className="card-body space-y-5">
-          <div className="p-4 rounded-[var(--radius)] bg-[var(--surface-2)] border border-[var(--border)]">
-            <h4 className="text-xs font-bold text-[var(--ink)] mb-1 flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-[var(--accent)]" />
-              Multilingual Multi-Turn Test Presets
-            </h4>
-            <p className="text-xs text-[var(--ink-muted)]">
-              Click a preset below to simulate a live voice turn. Notice how Turn 2 automatically updates the same lead record without creating duplicate database rows!
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {SIMULATION_PRESETS.map((preset) => (
-              <div
-                key={preset.id}
-                className="p-4 rounded-[var(--radius)] bg-[var(--surface)] border border-[var(--border)] hover:border-[var(--accent)]/40 transition-all flex flex-col justify-between space-y-3"
-              >
-                <div>
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <span className="text-xs font-bold text-[var(--ink)]">{preset.title}</span>
-                    <span className="badge badge-primary font-mono text-[10px]">{preset.lang}</span>
-                  </div>
-                  <p className="text-xs text-[var(--ink-soft)] leading-relaxed italic bg-[var(--surface-2)] p-2.5 rounded-[var(--radius-sm)] border border-[var(--border)]">
-                    "{preset.text}"
-                  </p>
-                </div>
-
-                <button
-                  onClick={() => runSimulationTurn(preset.text, preset.lang)}
-                  disabled={voiceState === "processing"}
-                  className="btn btn-secondary btn-sm w-full cursor-pointer gap-2"
-                >
-                  <Play className="h-3 w-3 fill-current text-[var(--accent)]" />
-                  <span>Run Turn Simulation</span>
-                </button>
-              </div>
-            ))}
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -109,13 +109,12 @@ def test_database_connection_error_raises_exception():
 def test_database_query_error_handling():
     """Verify operational query errors raise DatabaseOperationError."""
     repo = LeadRepository()
-    with patch.object(repo, "get_connection") as mock_conn_func:
-        mock_conn = MagicMock()
-        mock_cur = MagicMock()
-        mock_cur.execute.side_effect = psycopg2.ProgrammingError("Simulated SQL syntax failure")
-        mock_conn.cursor.return_value.__enter__.return_value = mock_cur
-        mock_conn_func.return_value = mock_conn
+    mock_conn = MagicMock()
+    mock_cur = MagicMock()
+    mock_cur.execute.side_effect = psycopg2.ProgrammingError("Simulated SQL syntax failure")
+    mock_conn.cursor.return_value.__enter__.return_value = mock_cur
 
+    with patch.object(repo, "get_connection", return_value=mock_conn), patch.object(repo, "get_pool", return_value=None):
         lead = Lead(name="Error Lead")
         with pytest.raises(DatabaseOperationError) as exc_info:
             repo.create_lead(lead)

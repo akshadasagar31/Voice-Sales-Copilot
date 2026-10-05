@@ -30,6 +30,7 @@ else:
     load_dotenv(override=True)
 
 import io
+import re
 import wave
 import json
 import asyncio
@@ -48,6 +49,7 @@ from services.stt import (
     DeepgramAPIError,
     build_deepgram_ws_url,
     normalize_stt_transcript,
+    get_deepgram_ws_pool,
 )
 from services.sarvam_stt import (
     SarvamSTTService,
@@ -56,7 +58,6 @@ from services.sarvam_stt import (
     SarvamSTTAPIError,
 )
 from services.language import (
-    detect_language,
     detect_spoken_language,
     get_response_language,
     is_new_lead_intent,
@@ -64,8 +65,15 @@ from services.language import (
     get_greeting_response,
     is_assistant_query,
     get_assistant_query_response,
-    select_best_stt_transcript,
     LANG_MIXED,
+    ENGLISH_GRAMMAR_WORDS,
+    ENGLISH_CORE_WORDS,
+    MARATHI_WORDS,
+    HINDI_WORDS,
+    MARATHI_SPECIFIC_CHARS,
+    count_devanagari_chars,
+    CLARIFICATION_PROMPTS,
+    select_best_multilingual_transcript,
 )
 from services.lead_extractor import (
     Lead,
@@ -80,6 +88,7 @@ from services.lead_extractor import (
     get_next_missing_parameter,
     get_missing_parameter_prompt,
     extract_phone_number,
+    is_valid_phone_number,
     extract_email,
     extract_company,
     extract_loan_type,
@@ -87,8 +96,26 @@ from services.lead_extractor import (
     extract_tenure_months,
     extract_name,
     is_valid_prospect_name,
+    is_valid_company_name,
+    is_field_value_valid,
     merge_lead_safely,
     get_clarification_prompt,
+    REQUIRED_LEAD_FIELDS,
+    is_field_inquiry_or_refusal,
+    is_field_refusal,
+    is_field_inquiry,
+    is_flow_resume_intent,
+    is_general_question,
+    is_loan_intent,
+    is_loan_informational_question,
+    classify_turn_intent,
+    INTENT_LOAN_APPLICATION,
+    INTENT_LOAN_INFO_QUESTION,
+    INTENT_GENERIC_QUESTION,
+    INTENT_GREETING_OR_INTRO,
+    INTENT_FIELD_INQUIRY_OR_REFUSAL,
+    INTENT_FLOW_RESUME,
+    INTENT_LEAD_DATA,
 )
 import uuid
 from services.lead_repository import (
@@ -109,11 +136,15 @@ from services.tts import (
     SarvamTTSConfigurationError,
     SarvamTTSAPIError,
     generate_concise_response,
+    get_cached_tts_audio,
+    set_cached_tts_audio,
 )
 from services.sarvam_tts import (
     clean_hindi_financial_text,
     clean_marathi_financial_text,
     clean_english_financial_text,
+    get_sarvam_tts_service,
+    prewarm_sarvam_client,
 )
 from services.language import is_greeting, get_greeting_response, detect_language as detect_text_language
 
@@ -151,6 +182,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=86400,
 )
 
 
@@ -665,6 +697,15 @@ async def ask_question_endpoint(request: AskRequest):
         retriever = VectorRetriever(pinecone_service=pinecone_service)
         rag_service = RAGService(retriever=retriever)
 
+        # Resolve dynamic active LLM model if none specified
+        active_llm = None
+        try:
+            from services.model_manager import get_active_model_id
+            active_llm = get_active_model_id("llm")
+        except Exception:
+            pass
+        effective_model = request.model or active_llm
+
         # If streaming mode is requested, return real-time Server-Sent Events (SSE)
         if request.stream:
             return StreamingResponse(
@@ -673,7 +714,7 @@ async def ask_question_endpoint(request: AskRequest):
                     top_k=request.top_k or 8,
                     namespace=target_namespace,
                     filter_dict=request.filter,
-                    model=request.model,
+                    model=effective_model,
                     language=request.language,
                 ),
                 media_type="text/event-stream",
@@ -689,7 +730,7 @@ async def ask_question_endpoint(request: AskRequest):
             top_k=request.top_k or 8,
             namespace=target_namespace,
             filter_dict=request.filter,
-            model=request.model,
+            model=effective_model,
             language=request.language,
         )
         return JSONResponse(status_code=status.HTTP_200_OK, content=answer_result)
@@ -753,11 +794,35 @@ async def voice_entry(
     module: Optional[str] = Form(None),
     existing_lead: Optional[str] = Form(None),
     lead_id: Optional[int] = Form(None),
+    is_interim: Optional[bool] = Form(None),
+    is_final: Optional[bool] = Form(None),
 ):
     """
     Accepts recorded voice note audio (Blob/File), transcribes to text via Sarvam (for Module 2 Hindi)
     or Deepgram Nova-3 (for English, Marathi, Module 1, and fallback).
     """
+    # CRITICAL: Ignore interim / partial STT requests immediately
+    if is_interim is True or is_final is False:
+        logger.info("[voice-entry] Interim STT input ignored.")
+        clean_lead = {}
+        if existing_lead:
+            try:
+                clean_lead = json.loads(existing_lead) if isinstance(existing_lead, str) else dict(existing_lead)
+            except Exception:
+                clean_lead = {}
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "status": "interim_ignored",
+                "is_interim": True,
+                "transcript": "",
+                "lead": clean_lead,
+                "lead_id": lead_id,
+                "next_missing_parameter": get_next_missing_parameter(clean_lead),
+                "is_complete": False,
+            },
+        )
+
     upload = file or audio_file
     if not upload or not upload.filename:
         raise HTTPException(
@@ -796,9 +861,16 @@ async def voice_entry(
         )
 
         req_lang = (language or "").strip().lower()
-        is_hindi = req_lang in ("hi", "hi-in", "hindi")
-        is_marathi = req_lang in ("mr", "mr-in", "marathi")
-        is_english = req_lang in ("en", "en-in", "en-us", "english")
+        if req_lang in ("mr", "mr-in", "marathi"):
+            req_lang = "mr"
+        elif req_lang in ("hi", "hi-in", "hindi"):
+            req_lang = "hi"
+        elif req_lang in ("en", "en-in", "en-us", "english"):
+            req_lang = "en"
+
+        is_hindi = req_lang == "hi"
+        is_marathi = req_lang == "mr"
+        is_english = req_lang == "en"
         mod_lower = (module or "").strip().lower()
         is_module2 = mod_lower in ("module2", "knowledge_assistant", "rag")
         is_module1 = mod_lower in ("module1", "crm", "voice_copilot", "voice-copilot")
@@ -814,26 +886,48 @@ async def voice_entry(
             elif is_marathi:
                 dg_lang = "mr"
             else:
-                dg_lang = "multi"
+                dg_lang = None
 
-            stt_service = DeepgramSTTService()
-            result = await stt_service.transcribe_audio(
-                content,
-                content_type=content_type,
-                model="nova-3",
-                language=dg_lang,
-            )
+            # Resolve dynamic active STT model
+            active_stt = get_model_manager().get_active_model("stt") or {}
+            stt_model_id = (active_stt.get("model_id") or "nova-3").strip()
+            stt_provider = (active_stt.get("provider") or "").lower()
+            stt_api_key = active_stt.get("api_key")
+
+            if stt_provider in ("sarvam ai", "sarvam") or "saaras" in stt_model_id:
+                sarvam_stt = SarvamSTTService(api_key=stt_api_key) if stt_api_key else SarvamSTTService()
+                sarvam_lang = "mr-IN" if is_marathi else ("hi-IN" if is_hindi else "en-IN")
+                result = await sarvam_stt.transcribe_audio(
+                    content,
+                    content_type=content_type,
+                    language_code=sarvam_lang,
+                    model=stt_model_id if "saaras" in stt_model_id else "saaras:v4",
+                    filename=upload.filename,
+                )
+            else:
+                stt_service = DeepgramSTTService(api_key=stt_api_key) if stt_api_key else DeepgramSTTService()
+                result = await stt_service.transcribe_audio(
+                    content,
+                    content_type=content_type,
+                    model=stt_model_id,
+                    language=dg_lang,
+                )
             result["filename"] = upload.filename
-            raw_transcript = normalize_stt_transcript(result.get("transcript", ""))
+            # Log raw final transcript before any processing
+            raw_transcript = result.get("transcript", "")
+            logger.info(
+                f"[voice-entry:module1] Raw {stt_model_id} final transcript (dg_lang={dg_lang}): '{raw_transcript}'"
+            )
+            # Transcript already normalized by transcribe_audio; no double normalization needed
             result["transcript"] = raw_transcript
-            result["stt_provider"] = "deepgram"
+            result["stt_provider"] = stt_provider or "deepgram"
             result["model"] = "nova-3"
             greeting_flag = is_greeting(raw_transcript)
             result["is_greeting"] = greeting_flag
 
             # Authoritative language resolution for Module 1 from actual spoken transcript
-            spoken_lang = detect_spoken_language(raw_transcript)
-            resp_lang = get_response_language(spoken_lang)
+            spoken_lang = detect_spoken_language(raw_transcript, requested_language=req_lang)
+            resp_lang = get_response_language(spoken_lang, requested_language=req_lang, text=raw_transcript)
             result["detected_language"] = spoken_lang
             result["language"] = resp_lang
 
@@ -842,23 +936,6 @@ async def voice_entry(
                 result["greeting_response"] = greeting_text
                 result["immediate_sentence1"] = greeting_text
                 result["is_greeting"] = True
-            elif is_assistant_query(raw_transcript):
-                assistant_answer = get_assistant_query_response(raw_transcript, resp_lang)
-                result["is_assistant_query"] = True
-                result["assistant_response"] = assistant_answer
-                result["immediate_sentence1"] = assistant_answer
-                clean_existing = {}
-                if existing_lead:
-                    try:
-                        clean_existing = json.loads(existing_lead) if isinstance(existing_lead, str) else dict(existing_lead)
-                    except Exception:
-                        clean_existing = {}
-                result["lead"] = clean_existing
-                result["lead_id"] = lead_id
-                logger.info(
-                    f"[voice-entry:module1] Assistant query handled: '{raw_transcript}' -> '{assistant_answer}'"
-                )
-                return JSONResponse(status_code=status.HTTP_200_OK, content=result)
             elif raw_transcript:
                 try:
                     clean_existing = {}
@@ -877,6 +954,137 @@ async def voice_entry(
                         result["is_new_lead"] = True
 
                     prior_missing = get_next_missing_parameter(clean_existing)
+
+                    # 1. Flow Resume: user voluntarily continues a paused flow
+                    if prior_missing and is_flow_resume_intent(raw_transcript):
+                        cont_prompt = get_missing_parameter_prompt(prior_missing, clean_existing, lang=resp_lang)
+                        result["is_resumed"] = True
+                        result["immediate_sentence1"] = cont_prompt
+                        result["lead"] = clean_existing
+                        result["lead_id"] = lead_id
+                        result["next_missing_parameter"] = prior_missing
+                        result["is_complete"] = False
+                        logger.info(
+                            f"[voice-entry:module1] Flow resumed on '{prior_missing}': '{raw_transcript}' -> '{cont_prompt}'"
+                        )
+                        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
+
+                    # 2. Refusal / Pause: user refuses to provide a requested field or says "don't proceed"
+                    if prior_missing and is_field_refusal(raw_transcript, prior_missing):
+                        extractor = LeadExtractorService()
+                        refusal_ack = extractor.handle_field_refusal(
+                            raw_transcript, prior_missing, existing_lead=clean_existing, language=resp_lang
+                        )
+                        result["is_field_refusal"] = True
+                        result["is_paused"] = True
+                        result["is_field_inquiry"] = True
+                        result["is_assistant_query"] = True
+                        result["assistant_response"] = refusal_ack
+                        result["immediate_sentence1"] = refusal_ack
+                        result["lead"] = clean_existing
+                        result["lead_id"] = lead_id
+                        result["next_missing_parameter"] = prior_missing
+                        result["is_complete"] = False
+                        logger.info(
+                            f"[voice-entry:module1] Field refusal/pause handled on '{prior_missing}': '{raw_transcript}' -> '{refusal_ack}'"
+                        )
+                        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
+
+                    # 3. Field Inquiry: user asks why the field is required or expresses privacy concern
+                    if prior_missing and is_field_inquiry(raw_transcript, prior_missing):
+                        extractor = LeadExtractorService()
+                        explanation = extractor.explain_field_requirement(
+                            raw_transcript, prior_missing, existing_lead=clean_existing, language=resp_lang
+                        )
+                        result["is_field_inquiry"] = True
+                        result["is_assistant_query"] = True
+                        result["assistant_response"] = explanation
+                        result["immediate_sentence1"] = explanation
+                        result["lead"] = clean_existing
+                        result["lead_id"] = lead_id
+                        result["next_missing_parameter"] = prior_missing
+                        result["is_complete"] = False
+                        logger.info(
+                            f"[voice-entry:module1] Field inquiry handled on '{prior_missing}': '{raw_transcript}' -> '{explanation}'"
+                        )
+                        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
+
+                    # 4. General / Random Question: send to CURRENT ACTIVE LLM and never hardcode answers
+                    if is_general_question(raw_transcript, context_field=prior_missing):
+                        extractor = LeadExtractorService()
+                        has_active_lead = bool(clean_existing) and any(
+                            clean_existing.get(f) is not None and str(clean_existing.get(f)).strip() != ""
+                            for f in REQUIRED_LEAD_FIELDS
+                        )
+                        is_asst_ident = is_assistant_query(raw_transcript)
+                        pending_to_resume = prior_missing if (has_active_lead or is_asst_ident) else None
+                        raw_llm = extractor.answer_general_query(
+                            raw_transcript,
+                            language=resp_lang,
+                            existing_lead=clean_existing,
+                            pending_field=None,
+                        )
+                        cont_prompt = (
+                            get_missing_parameter_prompt(pending_to_resume, clean_existing, lang=resp_lang)
+                            if pending_to_resume
+                            else ""
+                        )
+                        assistant_answer = (
+                            f"{raw_llm} {cont_prompt}".strip()
+                            if (cont_prompt and cont_prompt not in raw_llm)
+                            else raw_llm
+                        )
+                        result["is_assistant_query"] = True
+                        result["is_general_query"] = True
+                        result["assistant_response"] = raw_llm
+                        result["immediate_sentence1"] = assistant_answer
+                        result["lead"] = clean_existing
+                        result["lead_id"] = lead_id
+                        result["next_missing_parameter"] = pending_to_resume
+                        result["is_complete"] = False
+                        logger.info(
+                            f"[voice-entry:module1] General question handled via active LLM: '{raw_transcript}' -> '{assistant_answer}'"
+                        )
+                        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
+
+                    # 5. Loan / Lead Intent on fresh turn: start existing lead flow and ask first missing field
+                    if not clean_existing and is_loan_intent(raw_transcript):
+                        immediate_lead = {}
+                        phone_found = extract_phone_number(raw_transcript)
+                        if phone_found:
+                            immediate_lead["phone"] = phone_found
+                        email_found = extract_email(raw_transcript)
+                        if email_found:
+                            immediate_lead["email"] = email_found
+                        comp_found = extract_company(raw_transcript)
+                        if comp_found:
+                            immediate_lead["company"] = comp_found
+                        lt_found = extract_loan_type(raw_transcript)
+                        if lt_found:
+                            immediate_lead["loan_type"] = lt_found
+                        amt_found = extract_loan_amount(raw_transcript)
+                        if amt_found:
+                            immediate_lead["loan_amount"] = amt_found
+                        tenure_found = extract_tenure_months(raw_transcript)
+                        if tenure_found:
+                            immediate_lead["tenure_months"] = tenure_found
+                        name_found = extract_name(raw_transcript)
+                        if name_found and is_valid_prospect_name(name_found):
+                            immediate_lead["name"] = name_found
+
+                        next_missing = get_next_missing_parameter(immediate_lead)
+                        prompt_msg = get_missing_parameter_prompt(next_missing, immediate_lead, lang=resp_lang)
+                        result["is_new_lead"] = True
+                        result["immediate_sentence1"] = prompt_msg
+                        result["lead"] = immediate_lead
+                        result["lead_id"] = None
+                        result["next_missing_parameter"] = next_missing
+                        result["is_complete"] = next_missing is None
+                        logger.info(
+                            f"[voice-entry:module1] Loan intent started on fresh session: '{raw_transcript}' -> '{prompt_msg}'"
+                        )
+                        return JSONResponse(status_code=status.HTTP_200_OK, content=result)
+
                     immediate_lead = dict(clean_existing)
 
                     phone_found = extract_phone_number(raw_transcript)
@@ -905,26 +1113,42 @@ async def voice_entry(
                         if immediate_lead.get(k) is None and v is not None:
                             immediate_lead[k] = v
 
+                    # Check if prior requested parameter was not satisfied by the speech turn
+                    was_unclear = False
+                    if prior_missing and prior_missing in REQUIRED_LEAD_FIELDS:
+                        prior_val = immediate_lead.get(prior_missing)
+                        prior_satisfied = prior_val is not None and (not isinstance(prior_val, str) or bool(prior_val.strip()))
+                        newly_collected_any = any(
+                            immediate_lead.get(f) is not None and clean_existing.get(f) is None
+                            for f in REQUIRED_LEAD_FIELDS
+                        )
+                        if not prior_satisfied and not newly_collected_any:
+                            was_unclear = True
+
                     next_missing = get_next_missing_parameter(immediate_lead)
-                    immediate_sentence1 = get_missing_parameter_prompt(next_missing, immediate_lead, lang=resp_lang)
+                    if was_unclear:
+                        immediate_sentence1 = get_clarification_prompt(prior_missing, raw_transcript, immediate_lead, lang=resp_lang)
+                    else:
+                        immediate_sentence1 = get_missing_parameter_prompt(next_missing, immediate_lead, lang=resp_lang)
 
                     result["immediate_sentence1"] = immediate_sentence1
                     result["lead"] = immediate_lead
                     result["next_missing_parameter"] = next_missing
                     result["is_complete"] = next_missing is None
+                    result["is_unclear"] = was_unclear
+                    result["clarified_field"] = prior_missing if was_unclear else None
 
                     # Non-blocking database sync: update lead in background when lead_id exists;
-                    # on initial turn, create lead using pooled connection (<1ms) to establish ID
+                    # on initial turn, create lead using async thread pool to establish ID without blocking
                     has_data = any(v is not None for v in immediate_lead.values() if v != "")
                     if has_data:
                         try:
-                            from services.lead_repository import LeadRepository
-                            repo = LeadRepository()
+                            repo = get_shared_lead_repo()
                             val_lead = Lead.model_validate(immediate_lead)
                             if lead_id is not None:
                                 background_tasks.add_task(repo.update_lead, lead_id, val_lead)
                             else:
-                                created = repo.create_lead(val_lead)
+                                created = await asyncio.to_thread(repo.create_lead, val_lead)
                                 if created and "id" in created:
                                     lead_id = created["id"]
                         except Exception as persist_err:
@@ -949,13 +1173,30 @@ async def voice_entry(
             elif is_marathi:
                 dg_lang = "mr"
 
-            deepgram_service = DeepgramSTTService()
-            result = await deepgram_service.transcribe_audio(
-                content,
-                content_type=content_type,
-                language=dg_lang,
-                model="nova-3",
-            )
+            # Resolve dynamic active STT model
+            active_stt = get_model_manager().get_active_model("stt") or {}
+            stt_model_id = (active_stt.get("model_id") or "nova-3").strip()
+            stt_provider = (active_stt.get("provider") or "").lower()
+            stt_api_key = active_stt.get("api_key")
+
+            if stt_provider in ("sarvam ai", "sarvam") or "saaras" in stt_model_id:
+                sarvam_stt = SarvamSTTService(api_key=stt_api_key) if stt_api_key else SarvamSTTService()
+                sarvam_lang = "mr-IN" if is_marathi else ("hi-IN" if is_hindi else "en-IN")
+                result = await sarvam_stt.transcribe_audio(
+                    content,
+                    content_type=content_type,
+                    language_code=sarvam_lang,
+                    model=stt_model_id if "saaras" in stt_model_id else "saaras:v4",
+                    filename=upload.filename,
+                )
+            else:
+                deepgram_service = DeepgramSTTService(api_key=stt_api_key) if stt_api_key else DeepgramSTTService()
+                result = await deepgram_service.transcribe_audio(
+                    content,
+                    content_type=content_type,
+                    language=dg_lang,
+                    model=stt_model_id,
+                )
             result["filename"] = upload.filename
             raw_transcript = (result.get("transcript") or "").strip()
             detected = result.get("detected_language") or (dg_lang if dg_lang != "multi" else "en")
@@ -1009,7 +1250,7 @@ async def voice_entry(
             language=language,
         )
         result["filename"] = upload.filename
-        raw_transcript = normalize_stt_transcript(result.get("transcript", ""))
+        raw_transcript = result.get("transcript", "")
         result["transcript"] = raw_transcript
 
         if is_module1:
@@ -1062,6 +1303,700 @@ async def voice_entry(
         )
 
 
+_lead_repo: Optional[LeadRepository] = None
+
+def get_shared_lead_repo() -> LeadRepository:
+    """Returns singleton LeadRepository instance with pre-warmed connection pool."""
+    global _lead_repo
+    if _lead_repo is None:
+        _lead_repo = LeadRepository()
+    return _lead_repo
+
+
+def generate_module1_ws_response(
+    current: str,
+    req_lang: str,
+    last_conf: float,
+    existing_lead_str: Optional[str] = None,
+    lead_id_val: Optional[int] = None,
+) -> dict:
+    """
+    Sub-millisecond deterministic extraction and prompt generator for Module 1 WebSocket streaming.
+    Returns the immediate sentence 1, lead object, and next missing parameter directly in the final event.
+    """
+    req_clean = (req_lang or "").strip().lower()
+    if req_clean in ("mr", "mr-in", "marathi"):
+        req_clean = "mr"
+    elif req_clean in ("hi", "hi-in", "hindi"):
+        req_clean = "hi"
+    elif req_clean in ("en", "en-in", "en-us", "english"):
+        req_clean = "en"
+
+    # Evaluate language strictly from current turn transcript, never inheriting previous assistant/user language
+    detected_turn_lang = detect_spoken_language(current, requested_language=req_clean, confidence=last_conf)
+    lang = detected_turn_lang if detected_turn_lang in ("en", "hi", "mr") else (req_clean if req_clean in ("en", "hi", "mr") else "en")
+    resp_lang = get_response_language(lang, requested_language=lang, text=current)
+    if lang not in ("en", "hi", "mr"):
+        lang = "en"
+    if resp_lang not in ("en", "hi", "mr"):
+        resp_lang = "en"
+
+    is_greet = is_greeting(current)
+    greet_resp = get_greeting_response(resp_lang) if is_greet else ""
+    asst_resp = get_assistant_query_response(current, resp_lang, allow_llm=False)
+
+    clean_existing = {}
+    if existing_lead_str:
+        try:
+            clean_existing = json.loads(existing_lead_str) if isinstance(existing_lead_str, str) else dict(existing_lead_str)
+        except Exception:
+            clean_existing = {}
+
+    is_prior_complete = get_next_missing_parameter(clean_existing) is None and bool(clean_existing)
+    is_reset = is_new_lead_intent(current) or is_prior_complete
+    if is_reset:
+        clean_existing = {}
+        lead_id_val = None
+
+    prior_missing = get_next_missing_parameter(clean_existing)
+
+    # 1. Flow Resume: user voluntarily continues a paused flow
+    if prior_missing and is_flow_resume_intent(current):
+        cont_prompt = get_missing_parameter_prompt(prior_missing, clean_existing, lang=resp_lang)
+        return {
+            "type": "final",
+            "transcript": current,
+            "confidence": round(last_conf, 4),
+            "detected_language": lang,
+            "language": resp_lang,
+            "is_greeting": False,
+            "greeting_response": "",
+            "is_assistant_query": False,
+            "is_field_inquiry": False,
+            "is_field_refusal": False,
+            "is_resumed": True,
+            "assistant_response": "",
+            "immediate_sentence1": cont_prompt,
+            "lead": clean_existing,
+            "lead_id": lead_id_val,
+            "next_missing_parameter": prior_missing,
+            "is_complete": False,
+            "is_new_lead": False,
+            "is_unclear": False,
+        }
+
+    # 2. Refusal / Pause: user refuses to provide a requested field or says "don't proceed"
+    if prior_missing and is_field_refusal(current, prior_missing):
+        extractor = LeadExtractorService()
+        refusal_ack = extractor.handle_field_refusal(
+            current, prior_missing, existing_lead=clean_existing, language=resp_lang
+        )
+        return {
+            "type": "final",
+            "transcript": current,
+            "confidence": round(last_conf, 4),
+            "detected_language": lang,
+            "language": resp_lang,
+            "is_greeting": False,
+            "greeting_response": "",
+            "is_assistant_query": True,
+            "is_field_inquiry": True,
+            "is_field_refusal": True,
+            "is_paused": True,
+            "assistant_response": refusal_ack,
+            "immediate_sentence1": refusal_ack,
+            "lead": clean_existing,
+            "lead_id": lead_id_val,
+            "next_missing_parameter": prior_missing,
+            "is_complete": False,
+            "is_new_lead": False,
+            "is_unclear": False,
+        }
+
+    # 3. Field Inquiry: user asks why the field is required or expresses privacy concern
+    if prior_missing and is_field_inquiry(current, prior_missing):
+        extractor = LeadExtractorService()
+        field_explanation = extractor.explain_field_requirement(
+            current, prior_missing, existing_lead=clean_existing, language=resp_lang
+        )
+        return {
+            "type": "final",
+            "transcript": current,
+            "confidence": round(last_conf, 4),
+            "detected_language": lang,
+            "language": resp_lang,
+            "is_greeting": False,
+            "greeting_response": "",
+            "is_assistant_query": True,
+            "is_field_inquiry": True,
+            "is_field_refusal": False,
+            "assistant_response": field_explanation,
+            "immediate_sentence1": field_explanation,
+            "lead": clean_existing,
+            "lead_id": lead_id_val,
+            "next_missing_parameter": prior_missing,
+            "is_complete": False,
+            "is_new_lead": False,
+            "is_unclear": False,
+        }
+
+    # 4. General / Random Question / Loan Info Question: send to CURRENT ACTIVE LLM and never hardcode answers
+    if is_general_question(current, context_field=prior_missing) or is_loan_informational_question(current):
+        extractor = LeadExtractorService()
+        has_active_lead = bool(clean_existing) and any(
+            clean_existing.get(f) is not None and str(clean_existing.get(f)).strip() != ""
+            for f in REQUIRED_LEAD_FIELDS
+        )
+        pending_to_resume = prior_missing if has_active_lead else None
+        llm_response = extractor.answer_general_query(
+            current,
+            language=resp_lang,
+            existing_lead=clean_existing if has_active_lead else {},
+            pending_field=pending_to_resume,
+        )
+        cont_prompt = (
+            get_missing_parameter_prompt(pending_to_resume, clean_existing, lang=resp_lang)
+            if pending_to_resume
+            else ""
+        )
+        full_response = (
+            f"{llm_response} {cont_prompt}".strip()
+            if (cont_prompt and cont_prompt not in llm_response)
+            else llm_response
+        )
+        return {
+            "type": "final",
+            "transcript": current,
+            "confidence": round(last_conf, 4),
+            "detected_language": lang,
+            "language": resp_lang,
+            "is_greeting": False,
+            "greeting_response": "",
+            "is_assistant_query": True,
+            "is_general_query": True,
+            "llm_unavailable": False,
+            "is_field_inquiry": False,
+            "is_field_refusal": False,
+            "is_resumed": False,
+            "assistant_response": llm_response,
+            "immediate_sentence1": full_response,
+            "lead": clean_existing if has_active_lead else {},
+            "lead_id": lead_id_val if has_active_lead else None,
+            "next_missing_parameter": pending_to_resume,
+            "is_complete": False,
+            "is_new_lead": False,
+            "is_unclear": False,
+            "speech_final": True,
+        }
+
+    # 5. Loan / Lead Intent on fresh turn: start existing lead flow
+    if not clean_existing and is_loan_intent(current):
+        immediate_lead = {}
+        phone_found = extract_phone_number(current)
+        if phone_found and is_valid_phone_number(phone_found):
+            immediate_lead["phone"] = phone_found
+        email_found = extract_email(current)
+        if email_found:
+            immediate_lead["email"] = email_found
+        comp_found = extract_company(current)
+        if comp_found and is_valid_company_name(comp_found):
+            immediate_lead["company"] = comp_found
+        lt_found = extract_loan_type(current)
+        if lt_found:
+            immediate_lead["loan_type"] = lt_found
+        amt_found = extract_loan_amount(current)
+        if amt_found and is_field_value_valid("loan_amount", amt_found):
+            immediate_lead["loan_amount"] = amt_found
+        tenure_found = extract_tenure_months(current)
+        if tenure_found and is_field_value_valid("tenure_months", tenure_found):
+            immediate_lead["tenure_months"] = tenure_found
+        name_found = extract_name(current)
+        if name_found and is_valid_prospect_name(name_found):
+            immediate_lead["name"] = name_found
+
+        next_missing = get_next_missing_parameter(immediate_lead)
+        prompt_msg = get_missing_parameter_prompt(next_missing, immediate_lead, lang=resp_lang)
+        return {
+            "type": "final",
+            "transcript": current,
+            "confidence": round(last_conf, 4),
+            "detected_language": lang,
+            "language": resp_lang,
+            "is_greeting": False,
+            "greeting_response": "",
+            "is_assistant_query": False,
+            "is_field_inquiry": False,
+            "is_field_refusal": False,
+            "is_resumed": False,
+            "assistant_response": "",
+            "immediate_sentence1": prompt_msg,
+            "lead": immediate_lead,
+            "lead_id": None,
+            "next_missing_parameter": next_missing,
+            "is_complete": next_missing is None,
+            "is_new_lead": True,
+            "is_unclear": False,
+            "speech_final": True,
+        }
+
+    # 6. If no active lead exists and neither loan intent nor name was expressed:
+    # Do NOT start lead collection.
+    # Greet user or answer as general query using active LLM.
+    has_active_lead = bool(clean_existing) and any(
+        clean_existing.get(f) is not None and str(clean_existing.get(f)).strip() != ""
+        for f in REQUIRED_LEAD_FIELDS
+    )
+    if not has_active_lead and not is_loan_intent(current):
+        has_greet_word = bool(
+            re.search(
+                r"\b(?:hello|hi|hey|greetings|good\s+(?:morning|afternoon|evening|day)|namaste|namaskar|pranam|halo|नमस्ते|नमस्कार|प्रणाम|हाय|हैलो|हॅलो)\b",
+                current,
+                re.IGNORECASE,
+            )
+        )
+        name_intro = extract_name(current)
+        if is_greet or has_greet_word:
+            prospect = name_intro if (name_intro and is_valid_prospect_name(name_intro)) else ""
+            if resp_lang == "hi":
+                greeting_text = f"नमस्ते {prospect} जी! मैं आज आपकी क्या सहायता कर सकता हूँ?" if prospect else get_greeting_response(resp_lang)
+            elif resp_lang == "mr":
+                greeting_text = f"नमस्कार {prospect} जी! मी आज आपली काय मदत करू शकेन?" if prospect else get_greeting_response(resp_lang)
+            else:
+                greeting_text = f"Hello {prospect}! How can I help you today?" if prospect else get_greeting_response(resp_lang)
+
+            return {
+                "type": "final",
+                "transcript": current,
+                "confidence": round(last_conf, 4),
+                "detected_language": lang,
+                "language": resp_lang,
+                "is_greeting": True,
+                "greeting_response": greeting_text,
+                "is_assistant_query": False,
+                "is_field_inquiry": False,
+                "is_field_refusal": False,
+                "is_resumed": False,
+                "assistant_response": greeting_text,
+                "immediate_sentence1": greeting_text,
+                "lead": {},
+                "lead_id": None,
+                "next_missing_parameter": None,
+                "is_complete": False,
+                "is_new_lead": False,
+                "is_unclear": False,
+                "speech_final": True,
+            }
+        elif not (name_intro and is_valid_prospect_name(name_intro)):
+            extractor = LeadExtractorService()
+            llm_response = extractor.answer_general_query(
+                current,
+                language=resp_lang,
+                existing_lead={},
+                pending_field=None,
+            )
+            return {
+                "type": "final",
+                "transcript": current,
+                "confidence": round(last_conf, 4),
+                "detected_language": lang,
+                "language": resp_lang,
+                "is_greeting": False,
+                "greeting_response": "",
+                "is_assistant_query": True,
+                "is_field_inquiry": False,
+                "is_field_refusal": False,
+                "is_resumed": False,
+                "assistant_response": llm_response,
+                "immediate_sentence1": llm_response,
+                "lead": {},
+                "lead_id": None,
+                "next_missing_parameter": None,
+                "is_complete": False,
+                "is_new_lead": False,
+                "is_unclear": False,
+                "speech_final": True,
+            }
+
+    immediate_lead = dict(clean_existing)
+    phone_found = extract_phone_number(current)
+    if phone_found and is_valid_phone_number(phone_found) and not immediate_lead.get("phone"):
+        immediate_lead["phone"] = phone_found
+    email_found = extract_email(current)
+    if email_found and not immediate_lead.get("email"):
+        immediate_lead["email"] = email_found
+    comp_found = extract_company(current, context_field=prior_missing)
+    if comp_found and is_valid_company_name(comp_found) and not immediate_lead.get("company"):
+        immediate_lead["company"] = comp_found
+    lt_found = extract_loan_type(current, context_field=prior_missing)
+    if lt_found and not immediate_lead.get("loan_type"):
+        immediate_lead["loan_type"] = lt_found
+    amt_found = extract_loan_amount(current, context_field=prior_missing)
+    if amt_found and is_field_value_valid("loan_amount", amt_found) and not immediate_lead.get("loan_amount"):
+        immediate_lead["loan_amount"] = amt_found
+    ten_found = extract_tenure_months(current, context_field=prior_missing)
+    if ten_found and is_field_value_valid("tenure_months", ten_found) and not immediate_lead.get("tenure_months"):
+        immediate_lead["tenure_months"] = ten_found
+    name_found = extract_name(current, context_field=prior_missing)
+    if name_found and is_valid_prospect_name(name_found) and not immediate_lead.get("name"):
+        immediate_lead["name"] = name_found
+
+    for k, v in clean_existing.items():
+        if immediate_lead.get(k) is None and v is not None:
+            immediate_lead[k] = v
+
+    was_unclear = False
+    if prior_missing:
+        prior_val = immediate_lead.get(prior_missing)
+        if not is_field_value_valid(prior_missing, prior_val):
+            was_unclear = True
+            immediate_lead.pop(prior_missing, None)
+
+    if was_unclear:
+        next_missing = prior_missing
+        if asst_resp:
+            cont_prompt = get_clarification_prompt(prior_missing, current, immediate_lead, lang=resp_lang)
+            immediate_sentence1 = f"{asst_resp} {cont_prompt}".strip() if (cont_prompt and cont_prompt not in asst_resp) else asst_resp
+        elif is_greet:
+            immediate_sentence1 = greet_resp
+        else:
+            immediate_sentence1 = get_clarification_prompt(prior_missing, current, immediate_lead, lang=resp_lang)
+    elif asst_resp:
+        next_missing = get_next_missing_parameter(immediate_lead)
+        cont_prompt = get_missing_parameter_prompt(next_missing, immediate_lead, lang=resp_lang)
+        immediate_sentence1 = f"{asst_resp} {cont_prompt}".strip() if (cont_prompt and cont_prompt not in asst_resp) else asst_resp
+    elif is_greet:
+        next_missing = get_next_missing_parameter(immediate_lead)
+        immediate_sentence1 = greet_resp
+    else:
+        next_missing = get_next_missing_parameter(immediate_lead)
+        immediate_sentence1 = get_missing_parameter_prompt(next_missing, immediate_lead, lang=resp_lang)
+
+    # Non-blocking async persist: update existing lead or create new lead in background
+    has_data = any(v is not None for v in immediate_lead.values() if v != "")
+    if has_data:
+        try:
+            repo = get_shared_lead_repo()
+            val_lead = Lead.model_validate(immediate_lead)
+            try:
+                loop = asyncio.get_running_loop()
+                if lead_id_val is not None:
+                    loop.create_task(asyncio.to_thread(repo.update_lead, lead_id_val, val_lead))
+                else:
+                    loop.create_task(asyncio.to_thread(repo.create_lead, val_lead))
+            except RuntimeError:
+                pass
+        except Exception as persist_err:
+            logger.debug(f"[ws:persist] {persist_err}")
+
+    return {
+        "type": "final",
+        "transcript": current,
+        "confidence": round(last_conf, 4),
+        "detected_language": lang,
+        "language": resp_lang,
+        "is_greeting": is_greet,
+        "greeting_response": greet_resp,
+        "is_assistant_query": bool(asst_resp),
+        "assistant_response": asst_resp or "",
+        "immediate_sentence1": immediate_sentence1,
+        "lead": immediate_lead,
+        "lead_id": lead_id_val,
+        "next_missing_parameter": next_missing,
+        "is_complete": next_missing is None,
+        "is_new_lead": is_reset,
+        "is_unclear": was_unclear,
+        "speech_final": True,
+    }
+
+
+async def _prewarm_tts_for_sentence1(text: str, language: str) -> None:
+    """Pre-synthesizes sentence 1 in the background so audio is cached before client HTTP request arrives."""
+    try:
+        clean = (text or "").strip()
+        if not clean:
+            return
+        lang = (language or "en").strip().lower()
+        if lang in ("mr", "mr-in", "marathi"):
+            t_lang = "mr"
+            speaker = os.getenv("SARVAM_MODULE1_MARATHI_VOICE", "ritu").strip().lower()
+            sarvam_lang = "mr-IN"
+        elif lang in ("hi", "hi-in", "hindi"):
+            t_lang = "hi"
+            speaker = os.getenv("SARVAM_MODULE1_HINDI_VOICE", "priya").strip().lower()
+            sarvam_lang = "hi-IN"
+        else:
+            t_lang = "en"
+            speaker = os.getenv("SARVAM_MODULE1_ENGLISH_VOICE", "simran").strip().lower()
+            sarvam_lang = "en-IN"
+
+        cache_key = f"m1:{t_lang}:{clean.lower()}"
+        if get_cached_tts_audio(cache_key) is not None:
+            return
+
+        service = get_sarvam_tts_service()
+        audio = await service.synthesize_speech(clean, language_code=sarvam_lang, speaker=speaker, model="bulbul:v3")
+        if audio:
+            set_cached_tts_audio(cache_key, audio)
+    except Exception as e:
+        logger.debug(f"[_prewarm_tts_for_sentence1] notice: {e}")
+
+
+async def _prewarm_standard_mod1_prompts() -> None:
+    """Pre-warms the Sarvam client and caches common first-turn prompts for instant delivery."""
+    try:
+        await prewarm_sarvam_client()
+        common_prompts = [
+            ("en", "Hello! May I have your name, please?"),
+            ("hi", "नमस्ते! आपका नाम क्या है?"),
+            ("mr", "नमस्कार! आपले नाव काय आहे?"),
+        ]
+        for lang, text in common_prompts:
+            await _prewarm_tts_for_sentence1(text, lang)
+    except Exception as e:
+        logger.debug(f"[_prewarm_standard_mod1_prompts] notice: {e}")
+
+
+async def _send_pipelined_mod1_response(websocket: WebSocket, mod1_res: dict) -> None:
+    """Sends one deterministic Module 1 response for each finalized user turn."""
+    imm = (mod1_res.get("immediate_sentence1") or "").strip()
+    if imm:
+        try:
+            asyncio.create_task(_prewarm_tts_for_sentence1(imm, mod1_res.get("language") or "en"))
+        except RuntimeError:
+            pass
+    mod1_res["has_subsequent_sentences"] = False
+    await websocket.send_json(mod1_res)
+
+
+async def _stream_general_query_ws(
+    websocket: WebSocket,
+    clean: str,
+    req_lang: str,
+    last_conf: float,
+    clean_existing: dict,
+    prior_missing: Optional[str],
+    lead_id_val: Optional[int],
+) -> None:
+    """Asynchronously streams general LLM responses over the active WebSocket without blocking the server."""
+    detected_turn_lang = detect_spoken_language(clean, requested_language=req_lang, confidence=last_conf)
+    lang = detected_turn_lang if detected_turn_lang in ("en", "hi", "mr") else (req_lang if req_lang in ("en", "hi", "mr") else "en")
+    resp_lang = get_response_language(lang, requested_language=lang, text=clean)
+    if lang not in ("en", "hi", "mr"):
+        lang = "en"
+    if resp_lang not in ("en", "hi", "mr"):
+        resp_lang = "en"
+
+    # Send initial final STT immediately so frontend stops listening and displays transcript (<1ms)
+    await websocket.send_json({
+        "type": "final",
+        "transcript": clean,
+        "confidence": round(last_conf, 4),
+        "detected_language": lang,
+        "language": resp_lang,
+        "is_greeting": False,
+        "greeting_response": "",
+        "is_assistant_query": True,
+        "is_general_query": True,
+        "llm_unavailable": False,
+        "is_field_inquiry": False,
+        "is_field_refusal": False,
+        "is_resumed": False,
+        "assistant_response": "",
+        "immediate_sentence1": "",
+        "has_subsequent_sentences": True,
+        "lead": clean_existing,
+        "lead_id": lead_id_val,
+        "next_missing_parameter": prior_missing,
+        "is_complete": False,
+        "is_new_lead": False,
+        "is_unclear": False,
+        "speech_final": True,
+    })
+
+    # Asynchronously stream tokens from OpenRouter LLM
+    extractor = LeadExtractorService()
+    buffer = ""
+    sentence_punct_pattern = re.compile(r'(?<=[.?!।॥\n])\s+')
+    stream_tokens = extractor.stream_general_query_tokens(
+        transcript=clean,
+        language=resp_lang,
+        existing_lead=clean_existing,
+        pending_field=prior_missing,
+    )
+
+    sent_any_sentence = False
+    try:
+        async for token in stream_tokens:
+            buffer += token
+            splits = sentence_punct_pattern.split(buffer)
+            if len(splits) > 1:
+                for complete_sentence in splits[:-1]:
+                    s_clean = complete_sentence.strip()
+                    if s_clean:
+                        await websocket.send_json({"type": "sentence", "sentence": s_clean})
+                        sent_any_sentence = True
+                buffer = splits[-1]
+
+        if buffer.strip():
+            await websocket.send_json({"type": "sentence", "sentence": buffer.strip()})
+            sent_any_sentence = True
+    except Exception as stream_err:
+        logger.warning(f"[ws/voice-stt] _stream_general_query_ws token stream error: {stream_err}")
+    finally:
+        if not sent_any_sentence:
+            if resp_lang == "hi":
+                fallback_msg = "मैं अभी अपने असिस्टेंट से संपर्क नहीं कर पा रहा हूँ। कृपया दोबारा पूछिए।"
+            elif resp_lang == "mr":
+                fallback_msg = "मी सध्या माझ्या असिस्टंटशी संपर्क साधू शकत नाही. कृपया पुन्हा विचारा."
+            else:
+                fallback_msg = "I'm having trouble reaching my assistant right now. Please ask that again."
+            try:
+                await websocket.send_json({"type": "sentence", "sentence": fallback_msg})
+            except Exception:
+                pass
+        try:
+            await websocket.send_json({"type": "stream_complete"})
+        except Exception:
+            pass
+
+
+
+async def _dispatch_stt_final_turn(
+    websocket: WebSocket,
+    clean: str,
+    winning_lang: str,
+    winning_conf: float,
+    is_mod1: bool,
+    existing_lead: Optional[str],
+    lead_id: Optional[int],
+) -> Optional[asyncio.Task]:
+    """
+    Authoritative final turn dispatcher for both Module 1 and Module 2.
+    Routes to lead extraction / general LLM query / Module 2 RAG response in the turn's exact language.
+    """
+    if not clean:
+        await websocket.send_json({
+            "type": "final",
+            "transcript": "",
+            "confidence": 0.0,
+            "speech_final": True,
+        })
+        return None
+
+    if winning_lang == "unclear":
+        target_clarify_lang = "en"
+        clarification_text = CLARIFICATION_PROMPTS.get(target_clarify_lang, "Could you please repeat that?")
+        await websocket.send_json({
+            "type": "final",
+            "transcript": clean,
+            "confidence": round(winning_conf, 4),
+            "detected_language": target_clarify_lang,
+            "language": target_clarify_lang,
+            "is_greeting": False,
+            "greeting_response": "",
+            "is_assistant_query": False,
+            "assistant_response": clarification_text,
+            "speech_final": True,
+        })
+        if is_mod1:
+            await websocket.send_json({
+                "type": "sentence",
+                "sentence": clarification_text,
+                "language": target_clarify_lang,
+                "is_final": True,
+            })
+        return None
+
+    if is_mod1:
+        clean_existing = {}
+        if existing_lead:
+            try:
+                clean_existing = json.loads(existing_lead) if isinstance(existing_lead, str) else dict(existing_lead)
+            except Exception:
+                clean_existing = {}
+        prior_missing = get_next_missing_parameter(clean_existing)
+        has_active_lead = bool(clean_existing) and any(
+            clean_existing.get(f) is not None and str(clean_existing.get(f)).strip() != ""
+            for f in REQUIRED_LEAD_FIELDS
+        )
+        pending_to_resume = prior_missing if has_active_lead else None
+
+        is_lead_intent = is_loan_intent(clean)
+        name_intro = extract_name(clean)
+        has_explicit_name = bool(name_intro and is_valid_prospect_name(name_intro) and re.search(r"\b(?:my\s+name\s+is|this\s+is|i\s+am)\s+[A-Za-z]+", clean, re.IGNORECASE))
+        is_greeting_turn = is_greeting(clean)
+        is_general_q_turn = is_general_question(clean, context_field=prior_missing)
+
+        if not has_active_lead:
+            if is_greeting_turn or (is_general_q_turn and not is_lead_intent and not has_explicit_name):
+                return asyncio.create_task(
+                    _stream_general_query_ws(
+                        websocket=websocket,
+                        clean=clean,
+                        req_lang=winning_lang,
+                        last_conf=winning_conf,
+                        clean_existing=clean_existing,
+                        prior_missing=None,
+                        lead_id_val=lead_id,
+                    )
+                )
+            elif is_lead_intent or has_explicit_name:
+                mod1_res = generate_module1_ws_response(clean, winning_lang, winning_conf, existing_lead, lead_id)
+                await _send_pipelined_mod1_response(websocket, mod1_res)
+                return None
+            else:
+                return asyncio.create_task(
+                    _stream_general_query_ws(
+                        websocket=websocket,
+                        clean=clean,
+                        req_lang=winning_lang,
+                        last_conf=winning_conf,
+                        clean_existing=clean_existing,
+                        prior_missing=None,
+                        lead_id_val=lead_id,
+                    )
+                )
+        else:
+            if is_greeting_turn or is_general_q_turn:
+                return asyncio.create_task(
+                    _stream_general_query_ws(
+                        websocket=websocket,
+                        clean=clean,
+                        req_lang=winning_lang,
+                        last_conf=winning_conf,
+                        clean_existing=clean_existing,
+                        prior_missing=pending_to_resume,
+                        lead_id_val=lead_id,
+                    )
+                )
+            else:
+                mod1_res = generate_module1_ws_response(clean, winning_lang, winning_conf, existing_lead, lead_id)
+                await _send_pipelined_mod1_response(websocket, mod1_res)
+                return None
+    else:
+        # Module 2 (Knowledge Assistant)
+        resp_lang = get_response_language(winning_lang, requested_language=winning_lang, text=clean)
+        is_greet = is_greeting(clean)
+        greet_resp = get_greeting_response(resp_lang) if is_greet else ""
+        asst_resp = get_assistant_query_response(clean, resp_lang)
+        await websocket.send_json({
+            "type": "final",
+            "transcript": clean,
+            "confidence": round(winning_conf, 4),
+            "detected_language": winning_lang,
+            "language": resp_lang,
+            "is_greeting": is_greet,
+            "greeting_response": greet_resp,
+            "is_assistant_query": bool(asst_resp),
+            "assistant_response": asst_resp or "",
+            "speech_final": True,
+        })
+        return None
+
+
+# select_best_multilingual_transcript is imported from services.language
+
+
 # ----------------------------------------------------------------------------
 # WEBSOCKET HANDLER: websocket_voice_stt (/ws/voice-stt)
 # ----------------------------------------------------------------------------
@@ -1080,81 +2015,155 @@ async def websocket_voice_stt(
     sample_rate: int = 48000,
     encoding: Optional[str] = "linear16",
     module: Optional[str] = None,
+    existing_lead: Optional[str] = None,
+    lead_id: Optional[int] = None,
 ):
     await websocket.accept()
 
-    api_key = os.getenv("DEEPGRAM_API_KEY", "").strip()
+    active_stt = get_model_manager().get_active_model("stt") or {}
+    stt_model_id = (active_stt.get("model_id") or "nova-3").strip()
+    stt_provider = (active_stt.get("provider") or "").lower()
+    if "sarvam" in stt_provider or "saaras" in stt_model_id.lower():
+        logger.info(f"[ws/voice-stt] Selected STT model '{stt_model_id}' is HTTP-only; routing WebSocket stream to nova-3")
+        stt_model_id = "nova-3"
+    stt_custom_key = active_stt.get("api_key")
+    api_key = (stt_custom_key or os.getenv("DEEPGRAM_API_KEY", "")).strip()
     if not api_key:
         await websocket.send_json({"type": "error", "message": "DEEPGRAM_API_KEY not configured in backend/.env"})
         await websocket.close(code=1008)
         return
 
     req_lang = (language or "").strip().lower()
-    is_explicit_single = req_lang in ("en", "hi", "mr")
+    if req_lang in ("mr", "mr-in", "marathi"):
+        req_lang = "mr"
+    elif req_lang in ("hi", "hi-in", "hindi"):
+        req_lang = "hi"
+    elif req_lang in ("en", "en-in", "en-us", "english"):
+        req_lang = "en"
+    else:
+        req_lang = "auto"
+
+    is_explicit_single = req_lang in ("mr", "hi", "en")
     is_mod1 = (module or "").strip().lower() in ("module1", "crm", "voice_copilot", "voice-copilot")
 
     headers = {"Authorization": f"Token {api_key}"}
 
-    logger.info(f"[ws/voice-stt] Client connected. Mode: {'single (' + req_lang + ')' if is_explicit_single else 'dual-stream (mr + multi)'}, module: {module}")
+    logger.info(f"[ws/voice-stt] Client connected. Mode: {'single-stream' if is_explicit_single else '3-stream-auto'} (model: {stt_model_id}, lang: {req_lang}), module: {module}")
 
     try:
         if is_explicit_single:
-            # Single-stream mode when user explicitly chose language
+            # Single-stream mode: strictly route to mr, hi, or en-IN
+            if req_lang == "mr":
+                dg_lang_ws = "mr"
+            elif req_lang == "hi":
+                dg_lang_ws = "hi"
+            else:
+                dg_lang_ws = "en-IN"
+
             single_url = build_deepgram_ws_url(
-                model="nova-3",
+                model=stt_model_id,
                 sample_rate=sample_rate,
-                language=req_lang,
+                language=dg_lang_ws,
                 encoding=encoding,
             )
-            async with websockets.connect(single_url, additional_headers=headers) as dg_ws:
+            dg_pool = get_deepgram_ws_pool()
+            dg_ws = await dg_pool.acquire(single_url, headers)
+            dg_broken = False
+
+            try:
                 accumulated_finals = []
                 latest_interim = ""
                 sent_final = False
                 last_conf = 1.0
-                single_pcm = bytearray()
+                finalize_requested = False
+                final_done_event = asyncio.Event()
+                general_query_task: Optional[asyncio.Task] = None
 
                 def get_current_transcript(include_interim: bool = True) -> str:
                     parts = list(accumulated_finals)
                     if include_interim and latest_interim and latest_interim.strip():
                         parts.append(latest_interim.strip())
-                    return normalize_stt_transcript(" ".join(parts))
+                    return " ".join(parts).strip()
+
+                async def emit_final_stt(source: str = "direct"):
+                    nonlocal sent_final, general_query_task
+                    if sent_final:
+                        return
+                    sent_final = True
+                    final_done_event.set()
+                    clean = get_current_transcript(include_interim=False) or get_current_transcript(include_interim=True)
+                    if clean:
+                        clean = normalize_stt_transcript(clean)
+                        logger.info(
+                            f"[ws/voice-stt] Raw Deepgram final transcript ({source}, req_lang={req_lang}, finalize_requested={finalize_requested}): '{clean}'"
+                        )
+                        final_lang = detect_spoken_language(clean, requested_language=req_lang, confidence=last_conf)
+                        general_query_task = await _dispatch_stt_final_turn(
+                            websocket=websocket,
+                            clean=clean,
+                            winning_lang=final_lang,
+                            winning_conf=last_conf,
+                            is_mod1=is_mod1,
+                            existing_lead=existing_lead,
+                            lead_id=lead_id,
+                        )
+                    else:
+                        logger.info(f"[ws/voice-stt] Emitting empty final transcript ({source})")
+                        await _dispatch_stt_final_turn(
+                            websocket=websocket,
+                            clean="",
+                            winning_lang="en",
+                            winning_conf=0.0,
+                            is_mod1=is_mod1,
+                            existing_lead=existing_lead,
+                            lead_id=lead_id,
+                        )
 
                 closed_single = False
 
                 async def client_to_single():
-                    nonlocal closed_single
+                    nonlocal closed_single, finalize_requested
                     try:
                         while True:
                             msg = await websocket.receive()
                             if "bytes" in msg and msg["bytes"]:
-                                single_pcm.extend(msg["bytes"])
                                 await dg_ws.send(msg["bytes"])
                             elif "text" in msg and msg["text"]:
                                 try:
                                     payload = json.loads(msg["text"])
-                                    if payload.get("type") == "CloseStream":
-                                        if not closed_single:
-                                             closed_single = True
-                                             await dg_ws.send(json.dumps({"type": "CloseStream"}))
+                                    msg_t = payload.get("type")
+                                    if msg_t in ("Finalize", "CloseStream"):
+                                        finalize_requested = True
+                                        try:
+                                            await dg_ws.send(json.dumps({"type": "Finalize"}))
+                                        except Exception:
+                                            pass
+
+                                        try:
+                                            await asyncio.wait_for(final_done_event.wait(), timeout=0.75)
+                                        except (asyncio.TimeoutError, Exception):
+                                            pass
+
+                                        if not sent_final:
+                                            await emit_final_stt("finalize_deadline")
                                         break
                                 except Exception:
                                     pass
                     except (WebSocketDisconnect, asyncio.CancelledError):
                         pass
                     except Exception as e:
-                        logger.debug(f"[ws/voice-stt] client_to_single exception: {e}")
+                        logger.info(f"[ws/voice-stt] client_to_single exception: {e}")
                     finally:
-                        if not closed_single:
-                            closed_single = True
-                            try:
-                                await dg_ws.send(json.dumps({"type": "CloseStream"}))
-                            except Exception:
-                                pass
+                        closed_single = True
 
                 async def single_to_client():
                     nonlocal sent_final, last_conf, latest_interim
                     try:
-                        async for dg_msg in dg_ws:
+                        while True:
+                            try:
+                                dg_msg = await dg_ws.recv()
+                            except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
+                                break
                             if isinstance(dg_msg, str):
                                 data = json.loads(dg_msg)
                                 msg_type = data.get("type")
@@ -1167,258 +2176,288 @@ async def websocket_voice_stt(
                                         if conf > 0:
                                             last_conf = conf
 
-                                        is_speech_final = data.get("speech_final", False)
                                         if data.get("is_final", False):
                                             if tr:
                                                 accumulated_finals.append(tr)
                                                 latest_interim = ""
-                                            current = get_current_transcript(include_interim=False)
-                                            # If speech_final is true, user finished speaking their utterance
-                                            if is_speech_final and current and not sent_final:
-                                                lang = detect_spoken_language(current) if req_lang == "auto" else req_lang
-                                                resp_lang = get_response_language(lang)
-                                                is_greet = is_greeting(current)
-                                                greet_resp = get_greeting_response(resp_lang) if is_greet else ""
-                                                asst_resp = get_assistant_query_response(current, resp_lang)
-                                                await websocket.send_json({
-                                                    "type": "final",
-                                                    "transcript": current,
-                                                    "confidence": round(last_conf, 4),
-                                                    "detected_language": lang,
-                                                    "language": resp_lang,
-                                                    "is_greeting": is_greet,
-                                                    "greeting_response": greet_resp,
-                                                    "is_assistant_query": bool(asst_resp),
-                                                    "assistant_response": asst_resp or "",
-                                                    "speech_final": True,
-                                                })
-                                                sent_final = True
-                                            elif current:
-                                                await websocket.send_json({"type": "interim", "transcript": current, "is_final": False})
+                                            if not finalize_requested:
+                                                current = get_current_transcript(include_interim=False)
+                                                if current:
+                                                    await websocket.send_json({"type": "interim", "transcript": current, "is_final": False})
                                         elif tr:
                                             latest_interim = tr
-                                            current = get_current_transcript(include_interim=True)
-                                            if current:
-                                                await websocket.send_json({"type": "interim", "transcript": current, "is_final": False})
+                                            if not finalize_requested:
+                                                current = get_current_transcript(include_interim=True)
+                                                if current:
+                                                    await websocket.send_json({"type": "interim", "transcript": current, "is_final": False})
+
+                                        if finalize_requested and (data.get("is_final") or data.get("speech_final")) and not sent_final:
+                                            await emit_final_stt("deepgram_is_final")
+
+                                        if sent_final:
+                                            break
                                 elif msg_type == "Metadata":
-                                    clean = get_current_transcript(include_interim=False) or get_current_transcript(include_interim=True)
-                                    if clean and not sent_final:
-                                        lang = detect_spoken_language(clean) if req_lang == "auto" else req_lang
-                                        resp_lang = get_response_language(lang)
-                                        is_greet = is_greeting(clean)
-                                        greet_resp = get_greeting_response(resp_lang) if is_greet else ""
-                                        asst_resp = get_assistant_query_response(clean, resp_lang)
-                                        await websocket.send_json({
-                                            "type": "final",
-                                            "transcript": clean,
-                                            "confidence": round(last_conf, 4),
-                                            "detected_language": lang,
-                                            "language": resp_lang,
-                                            "is_greeting": is_greet,
-                                            "greeting_response": greet_resp,
-                                            "is_assistant_query": bool(asst_resp),
-                                            "assistant_response": asst_resp or "",
-                                            "speech_final": True,
-                                        })
-                                        sent_final = True
-                                    await websocket.send_json({"type": "metadata", "metadata": data})
+                                    if finalize_requested and not sent_final:
+                                        await emit_final_stt("deepgram_metadata")
                                     break
                     except (WebSocketDisconnect, asyncio.CancelledError):
                         pass
                     except Exception as e:
-                        logger.debug(f"[ws/voice-stt] single_to_client exception: {e}")
+                        logger.info(f"[ws/voice-stt] single_to_client exception: {e}")
                     finally:
-                        if not sent_final:
-                            clean = get_current_transcript(include_interim=False) or get_current_transcript(include_interim=True)
-                            if clean:
-                                try:
-                                    lang = detect_spoken_language(clean) if req_lang == "auto" else req_lang
-                                    resp_lang = get_response_language(lang)
-                                    is_greet = is_greeting(clean)
-                                    greet_resp = get_greeting_response(resp_lang) if is_greet else ""
-                                    asst_resp = get_assistant_query_response(clean, resp_lang)
-                                    await websocket.send_json({
-                                        "type": "final",
-                                        "transcript": clean,
-                                        "confidence": round(last_conf, 4),
-                                        "detected_language": lang,
-                                        "language": resp_lang,
-                                        "is_greeting": is_greet,
-                                        "greeting_response": greet_resp,
-                                        "is_assistant_query": bool(asst_resp),
-                                        "assistant_response": asst_resp or "",
-                                        "speech_final": True,
-                                    })
-                                except Exception:
-                                    pass
+                        if finalize_requested and not sent_final:
+                            await emit_final_stt("finally_fallback")
 
                 c_task = asyncio.create_task(client_to_single())
                 s_task = asyncio.create_task(single_to_client())
-                await c_task
-                try:
-                    await asyncio.wait_for(s_task, timeout=3.5)
-                except asyncio.TimeoutError:
-                    s_task.cancel()
-                except Exception:
-                    pass
+                done, pending = await asyncio.wait([c_task, s_task], return_when=asyncio.FIRST_COMPLETED)
+                if s_task in pending and not sent_final:
+                    try:
+                        await asyncio.wait_for(s_task, timeout=0.5)
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                for t in pending:
+                    if not t.done():
+                        t.cancel()
+
+            except Exception as exc:
+                dg_broken = True
+                raise
+            finally:
+                if dg_ws:
+                    try:
+                        while True:
+                            await asyncio.wait_for(dg_ws.recv(), timeout=0.03)
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+                state_name = getattr(getattr(dg_ws, "state", None), "name", "")
+                is_stale_or_broken = dg_broken or (state_name != "OPEN" if dg_ws else True)
+                logger.info(f"[ws/voice-stt] Pool release: state={state_name}, dg_broken={dg_broken}, broken={is_stale_or_broken}")
+                await dg_pool.release(single_url, dg_ws, broken=is_stale_or_broken)
 
         else:
-            # Dual-stream mode (Auto-Detect): Stream audio to both Nova-3 Marathi and Nova-3 Multilingual
-            url_mr = build_deepgram_ws_url(
-                model="nova-3",
-                sample_rate=sample_rate,
-                language="mr",
-                encoding=encoding,
+            # -------------------------------------------------------------
+            # Multi-Stream Concurrent Auto STT Mode (en-IN, hi, mr)
+            # -------------------------------------------------------------
+            url_en = build_deepgram_ws_url(model=stt_model_id, sample_rate=sample_rate, language="en-IN", encoding=encoding)
+            url_hi = build_deepgram_ws_url(model=stt_model_id, sample_rate=sample_rate, language="hi", encoding=encoding)
+            url_mr = build_deepgram_ws_url(model=stt_model_id, sample_rate=sample_rate, language="mr", encoding=encoding)
+
+            dg_pool = get_deepgram_ws_pool()
+            ws_en, ws_hi, ws_mr = await asyncio.gather(
+                dg_pool.acquire(url_en, headers),
+                dg_pool.acquire(url_hi, headers),
+                dg_pool.acquire(url_mr, headers),
             )
-            url_multi = build_deepgram_ws_url(
-                model="nova-3",
-                sample_rate=sample_rate,
-                language="multi",
-                encoding=encoding,
-            )
+            sockets = {"en": ws_en, "hi": ws_hi, "mr": ws_mr}
+            urls = {"en": url_en, "hi": url_hi, "mr": url_mr}
+            broken = {"en": False, "hi": False, "mr": False}
 
-            async with websockets.connect(url_mr, additional_headers=headers) as ws_mr, \
-                       websockets.connect(url_multi, additional_headers=headers) as ws_multi:
+            accumulated: Dict[str, List[str]] = {"en": [], "hi": [], "mr": []}
+            confidences: Dict[str, List[float]] = {"en": [], "hi": [], "mr": []}
+            latest_interims: Dict[str, str] = {"en": "", "hi": "", "mr": ""}
+            streams_finished: Dict[str, bool] = {"en": False, "hi": False, "mr": False}
+            grace_timer_task: Optional[asyncio.Task] = None
 
-                finals = {"mr": [], "multi": []}
-                interims = {"mr": "", "multi": ""}
-                confs = {"mr": 1.0, "multi": 1.0}
-                sent_final = False
-                metadata_payload = None
-                dual_pcm = bytearray()
+            sent_final = False
+            finalize_requested = False
+            final_done_event = asyncio.Event()
+            general_query_task: Optional[asyncio.Task] = None
 
-                def build_stream_transcript(name: str) -> str:
-                    parts = list(finals[name])
-                    if interims[name] and interims[name].strip():
-                        parts.append(interims[name].strip())
-                    return normalize_stt_transcript(" ".join(parts))
+            def get_best_interim():
+                for k in ("mr", "hi"):
+                    txt = f"{' '.join(accumulated[k])} {latest_interims[k]}".strip()
+                    if any("\u0900" <= ch <= "\u097f" for ch in txt):
+                        return txt
+                txt_en = f"{' '.join(accumulated['en'])} {latest_interims['en']}".strip()
+                return txt_en
 
-                async def safe_send(ws, payload):
+            async def trigger_grace_timeout():
+                try:
+                    await asyncio.sleep(0.85)
+                    if finalize_requested and not sent_final:
+                        await emit_final_multi("grace_timeout")
+                except asyncio.CancelledError:
+                    pass
+
+            async def client_to_multi():
+                nonlocal finalize_requested
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        if "bytes" in msg and msg["bytes"]:
+                            b = msg["bytes"]
+                            await asyncio.gather(
+                                ws_en.send(b),
+                                ws_hi.send(b),
+                                ws_mr.send(b),
+                                return_exceptions=True,
+                            )
+                        elif "text" in msg and msg["text"]:
+                            try:
+                                payload = json.loads(msg["text"])
+                                if payload.get("type") in ("Finalize", "CloseStream"):
+                                    finalize_requested = True
+                                    fin_bytes = json.dumps({"type": "Finalize"})
+                                    await asyncio.gather(
+                                        ws_en.send(fin_bytes),
+                                        ws_hi.send(fin_bytes),
+                                        ws_mr.send(fin_bytes),
+                                        return_exceptions=True,
+                                    )
+                                    try:
+                                        await asyncio.wait_for(final_done_event.wait(), timeout=1.8)
+                                    except (asyncio.TimeoutError, Exception):
+                                        pass
+                                    if not sent_final:
+                                        await emit_final_multi("finalize_deadline")
+                                    break
+                            except Exception:
+                                pass
+                except (WebSocketDisconnect, asyncio.CancelledError):
+                    pass
+
+            async def stream_reader(lang_key: str, ws: Any):
+                nonlocal sent_final, grace_timer_task
+                try:
+                    while True:
+                        try:
+                            dg_msg = await ws.recv()
+                        except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
+                            broken[lang_key] = True
+                            streams_finished[lang_key] = True
+                            if finalize_requested and not sent_final:
+                                if all(streams_finished[k] or broken[k] for k in ("en", "hi", "mr")):
+                                    await emit_final_multi(f"all_streams_closed_{lang_key}")
+                            break
+                        if isinstance(dg_msg, str):
+                            data = json.loads(dg_msg)
+                            msg_type = data.get("type")
+                            if msg_type == "Results":
+                                alts = (data.get("channel") or {}).get("alternatives") or []
+                                if alts:
+                                    alt = alts[0]
+                                    tr = (alt.get("transcript") or "").strip()
+                                    conf = alt.get("confidence", 0.0)
+                                    if conf > 0:
+                                        confidences[lang_key].append(conf)
+                                    if data.get("is_final", False):
+                                        if tr:
+                                            accumulated[lang_key].append(tr)
+                                            latest_interims[lang_key] = ""
+                                        if not finalize_requested:
+                                            disp = get_best_interim()
+                                            if disp:
+                                                await websocket.send_json({"type": "interim", "transcript": disp, "is_final": False})
+                                    elif tr:
+                                        latest_interims[lang_key] = tr
+                                        if not finalize_requested:
+                                            disp = get_best_interim()
+                                            if disp:
+                                                await websocket.send_json({"type": "interim", "transcript": disp, "is_final": False})
+                            elif msg_type == "Metadata":
+                                streams_finished[lang_key] = True
+                                if finalize_requested and not sent_final:
+                                    if all(streams_finished[k] or broken[k] for k in ("en", "hi", "mr")):
+                                        await emit_final_multi("all_streams_metadata")
+                                    else:
+                                        if grace_timer_task is None or grace_timer_task.done():
+                                            grace_timer_task = asyncio.create_task(trigger_grace_timeout())
+                                break
+                except (WebSocketDisconnect, asyncio.CancelledError):
+                    pass
+                except Exception as e:
+                    broken[lang_key] = True
+                    streams_finished[lang_key] = True
+                    if finalize_requested and not sent_final:
+                        if all(streams_finished[k] or broken[k] for k in ("en", "hi", "mr")):
+                            await emit_final_multi(f"all_streams_err_{lang_key}")
+
+            async def emit_final_multi(source: str):
+                nonlocal sent_final, general_query_task
+                if sent_final:
+                    return
+                sent_final = True
+                final_done_event.set()
+
+                candidates = {}
+                for k in ("en", "hi", "mr"):
+                    parts = list(accumulated[k])
+                    if latest_interims[k] and latest_interims[k].strip():
+                        parts.append(latest_interims[k].strip())
+                    candidates[k] = {
+                        "transcript": " ".join(parts).strip(),
+                        "confidence": (sum(confidences[k]) / len(confidences[k])) if confidences[k] else 0.0
+                    }
+
+                logger.info(f"[ws/voice-stt] Auto STT multi-stream candidates ({source}): {candidates}")
+                winning_tr, winning_lang, winning_conf = select_best_multilingual_transcript(candidates)
+                clean = normalize_stt_transcript(winning_tr)
+                logger.info(f"[ws/voice-stt] Auto STT multi-stream winner ({source}): lang={winning_lang}, conf={winning_conf:.3f}, transcript='{clean}'")
+
+                general_query_task = await _dispatch_stt_final_turn(
+                    websocket=websocket,
+                    clean=clean,
+                    winning_lang=winning_lang,
+                    winning_conf=winning_conf,
+                    is_mod1=is_mod1,
+                    existing_lead=existing_lead,
+                    lead_id=lead_id,
+                )
+
+            c_task = asyncio.create_task(client_to_multi())
+            r_tasks = [
+                asyncio.create_task(stream_reader("en", ws_en)),
+                asyncio.create_task(stream_reader("hi", ws_hi)),
+                asyncio.create_task(stream_reader("mr", ws_mr)),
+            ]
+            all_tasks = [c_task] + r_tasks
+            try:
+                done, pending = await asyncio.wait(all_tasks, return_when=asyncio.FIRST_COMPLETED)
+                if c_task in done:
+                    if not sent_final and finalize_requested:
+                        try:
+                            await asyncio.wait_for(final_done_event.wait(), timeout=0.6)
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+                    if not sent_final:
+                        await emit_final_multi("client_done")
+                else:
+                    if all(t.done() for t in r_tasks):
+                        if not sent_final:
+                            await emit_final_multi("all_readers_done")
+                    else:
+                        try:
+                            await asyncio.wait_for(final_done_event.wait(), timeout=2.0)
+                        except (asyncio.TimeoutError, Exception):
+                            pass
+                        if not sent_final:
+                            await emit_final_multi("wait_done")
+                for t in all_tasks:
+                    if not t.done():
+                        t.cancel()
+            except Exception as multi_exc:
+                for k in ("en", "hi", "mr"):
+                    broken[k] = True
+                raise multi_exc
+            finally:
+                if grace_timer_task and not grace_timer_task.done():
+                    grace_timer_task.cancel()
+                for k in ("en", "hi", "mr"):
                     try:
-                        await ws.send(payload)
+                        s = sockets[k]
+                        if s:
+                            try:
+                                while True:
+                                    await asyncio.wait_for(s.recv(), timeout=0.03)
+                            except (asyncio.TimeoutError, Exception):
+                                pass
+                        state_name = getattr(getattr(s, "state", None), "name", "")
+                        is_stale_or_broken = broken[k] or (state_name != "OPEN" if s else True)
+                        await dg_pool.release(urls[k], s, broken=is_stale_or_broken)
                     except Exception:
                         pass
 
-                closed_dual = False
-
-                async def client_to_dual():
-                    nonlocal closed_dual
-                    try:
-                        while True:
-                            msg = await websocket.receive()
-                            if "bytes" in msg and msg["bytes"]:
-                                chunk = msg["bytes"]
-                                dual_pcm.extend(chunk)
-                                await asyncio.gather(safe_send(ws_mr, chunk), safe_send(ws_multi, chunk))
-                            elif "text" in msg and msg["text"]:
-                                try:
-                                    payload = json.loads(msg["text"])
-                                    if payload.get("type") == "CloseStream":
-                                        if not closed_dual:
-                                            closed_dual = True
-                                            close_msg = json.dumps({"type": "CloseStream"})
-                                            await asyncio.gather(safe_send(ws_mr, close_msg), safe_send(ws_multi, close_msg))
-                                        break
-                                except Exception:
-                                    pass
-                    except (WebSocketDisconnect, asyncio.CancelledError):
-                        pass
-                    except Exception as e:
-                        logger.debug(f"[ws/voice-stt] client_to_dual exception: {e}")
-                    finally:
-                        if not closed_dual:
-                            closed_dual = True
-                            close_msg = json.dumps({"type": "CloseStream"})
-                            await asyncio.gather(safe_send(ws_mr, close_msg), safe_send(ws_multi, close_msg))
-
-                async def listen_stream(ws, name: str):
-                    nonlocal metadata_payload
-                    try:
-                        async for dg_msg in ws:
-                            if isinstance(dg_msg, str):
-                                data = json.loads(dg_msg)
-                                msg_type = data.get("type")
-                                if msg_type == "Results":
-                                    alts = (data.get("channel") or {}).get("alternatives") or []
-                                    if alts:
-                                        alt = alts[0]
-                                        tr = (alt.get("transcript") or "").strip()
-                                        c = alt.get("confidence", 0.0)
-                                        if c > 0:
-                                            confs[name] = c
-                                        if data.get("is_final", False):
-                                            if tr:
-                                                finals[name].append(tr)
-                                                interims[name] = ""
-                                        elif tr:
-                                            interims[name] = tr
-
-                                        # Forward real-time interim to client
-                                        txt_mr = build_stream_transcript("mr")
-                                        txt_multi = build_stream_transcript("multi")
-                                        # Prefer Marathi interim if Marathi tokens present, otherwise multi
-                                        lang_mr = detect_language(txt_mr)
-                                        display_interim = txt_mr if lang_mr == "mr" and txt_mr else (txt_multi or txt_mr)
-                                        if display_interim:
-                                            try:
-                                                await websocket.send_json({"type": "interim", "transcript": display_interim})
-                                            except Exception:
-                                                pass
-                                elif msg_type == "Metadata":
-                                    if not metadata_payload:
-                                        metadata_payload = data
-                                    break
-                    except (WebSocketDisconnect, asyncio.CancelledError):
-                        pass
-                    except Exception as e:
-                        logger.debug(f"[ws/voice-stt] listen_stream({name}) exception: {e}")
-
-                c_task = asyncio.create_task(client_to_dual())
-                l_mr_task = asyncio.create_task(listen_stream(ws_mr, "mr"))
-                l_multi_task = asyncio.create_task(listen_stream(ws_multi, "multi"))
-
-                await c_task
-                try:
-                    await asyncio.wait_for(asyncio.gather(l_mr_task, l_multi_task), timeout=3.5)
-                except asyncio.TimeoutError:
-                    l_mr_task.cancel()
-                    l_multi_task.cancel()
-                except Exception:
-                    pass
-
-                clean_mr = build_stream_transcript("mr")
-                clean_multi = build_stream_transcript("multi")
-
-                chosen_text, chosen_lang, source = select_best_stt_transcript(clean_mr, clean_multi)
-                winning_conf = confs["mr"] if "MR" in source else confs["multi"]
-
-
-
-                if chosen_text and not sent_final:
-                    spoken_l = detect_spoken_language(chosen_text)
-                    resp_l = get_response_language(spoken_l)
-                    is_greet = is_greeting(chosen_text)
-                    greet_resp = get_greeting_response(resp_l) if is_greet else ""
-                    asst_resp = get_assistant_query_response(chosen_text, resp_l)
-                    logger.info(
-                        f"[ws/voice-stt] Dual-stream resolution -> {source} (lang: {chosen_lang}, conf: {winning_conf:.2f}): '{chosen_text}'"
-                    )
-                    await websocket.send_json({
-                        "type": "final",
-                        "transcript": chosen_text,
-                        "confidence": round(winning_conf, 4),
-                        "detected_language": chosen_lang,
-                        "language": resp_l,
-                        "is_greeting": is_greet,
-                        "greeting_response": greet_resp,
-                        "is_assistant_query": bool(asst_resp),
-                        "assistant_response": asst_resp or "",
-                        "speech_final": True,
-                    })
-                    sent_final = True
-
-                if metadata_payload:
-                    await websocket.send_json({"type": "metadata", "metadata": metadata_payload})
 
     except Exception as exc:
         logger.error(f"[ws/voice-stt] WebSocket error: {exc}")
@@ -1427,6 +2466,11 @@ async def websocket_voice_stt(
         except Exception:
             pass
     finally:
+        if general_query_task and not general_query_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(general_query_task), timeout=25.0)
+            except Exception as gq_err:
+                logger.warning(f"[ws/voice-stt] General query stream task finished: {gq_err}")
         try:
             await websocket.close()
         except Exception:
@@ -1491,13 +2535,22 @@ async def extract_lead_from_transcript(request: LeadExtractionRequest):
         )
 
     try:
+        # Dynamic active LLM model resolution
+        active_llm = None
+        try:
+            from services.model_manager import get_active_model_id
+            active_llm = get_active_model_id("llm")
+        except Exception:
+            pass
+        effective_model = request.model or active_llm
+
         extractor = LeadExtractorService()
 
         if request.stream:
             return StreamingResponse(
                 extractor.stream_lead_turn(
                     transcript=clean_transcript,
-                    model=request.model,
+                    model=effective_model,
                     existing_lead=request.existing_lead,
                     language=request.language,
                     lead_id=request.lead_id,
@@ -1514,7 +2567,7 @@ async def extract_lead_from_transcript(request: LeadExtractionRequest):
 
         result = extractor.extract_lead(
             clean_transcript,
-            model=request.model,
+            model=effective_model,
             existing_lead=request.existing_lead,
             language=request.language,
             is_interim=request.is_interim,
@@ -1591,9 +2644,17 @@ def startup_db_check():
     try:
         from services.stt import get_shared_stt_client
         from services.tts import get_shared_tts_client
+        from services.sarvam_tts import get_shared_sarvam_client, prewarm_sarvam_client
         get_shared_stt_client()
         get_shared_tts_client()
-        logger.info("Startup check: Deepgram STT and TTS keep-alive connection pools initialized.")
+        get_shared_sarvam_client()
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(_prewarm_standard_mod1_prompts())
+        except Exception:
+            pass
+        logger.info("Startup check: Deepgram STT, TTS, and Sarvam TTS keep-alive connection pools initialized.")
     except Exception as e:
         logger.debug(f"Startup check: STT/TTS pool initialization skipped: {e}")
 
@@ -1798,6 +2859,10 @@ async def tts_endpoint(request: TTSRequest):
     - For Module 1 (Voice-to-CRM): Uses Deepgram Aura TTS.
     Returns binary audio stream (audio/wav or audio/mpeg).
     """
+    import time as _lat_t3
+    _lat_t3_start = _lat_t3.perf_counter()
+    safe_preview = (request.text or '').strip()[:60].encode("ascii", errors="backslashreplace").decode("ascii")
+    print(f"[LATENCY] T6 TTS request START at perf={_lat_t3.perf_counter():.6f}s text='{safe_preview}'", flush=True)
     clean_text = (request.text or "").strip()
     if not clean_text:
         raise HTTPException(
@@ -1806,63 +2871,114 @@ async def tts_endpoint(request: TTSRequest):
         )
 
     # Determine target language and caller context
-    target_lang = (request.language or detect_text_language(clean_text) or "en").strip().lower()
+    has_devanagari = count_devanagari_chars(clean_text) > 0
+    detected_lang = detect_text_language(clean_text)
+
+    # If the text has Devanagari characters, it is strictly Indic (Hindi or Marathi, never English)
+    if has_devanagari:
+        req_l = (request.language or "").strip().lower()
+        if req_l in ("mr", "mr-in", "marathi"):
+            target_lang = "mr"
+        elif req_l in ("hi", "hi-in", "hindi"):
+            target_lang = "hi"
+        else:
+            target_lang = detected_lang if detected_lang in ("mr", "hi") else "hi"
+    else:
+        req_l = (request.language or "").strip().lower()
+        if req_l in ("auto", ""):
+            target_lang = detected_lang or "en"
+        else:
+            target_lang = req_l
+
     is_marathi = target_lang in ("mr", "mr-in", "marathi")
     is_hindi = target_lang in ("hi", "hi-in", "hindi")
-    is_english = target_lang in ("en", "en-in", "en-us", "en-gb", "english")
+    is_english = not (is_marathi or is_hindi)
     is_module2 = request.module in ("module2", "knowledge_assistant", "rag")
-
-    # Module 2 (Knowledge Assistant / Ask Assistant) & Module 1:
-    # Use Sarvam Bulbul v3 first ('en-IN', 'hi-IN', 'mr-IN' with voice 'simran').
-    # If Sarvam requires credits, returns HTTP 402/insufficient_quota, or fails due to quota/cost/error,
-    # automatically fallback to Deepgram TTS.
-    use_sarvam = (
-        is_module2
-        or (is_english or is_hindi or is_marathi)
-        or request.model in ("bulbul:v3", "sarvam")
-    )
-
     is_module1 = request.module in ("module1", "voice_copilot", "voice-copilot", "crm") or not is_module2
 
+    # Fast-Path: In-memory LRU prompt audio cache for Module 1 (< 1ms delivery for known phrases)
+    if is_module1 and not is_module2:
+        cache_key = f"m1:{target_lang}:{clean_text.strip().lower()}"
+        cached_audio = get_cached_tts_audio(cache_key)
+        if cached_audio:
+            print(f"[LATENCY] T7 TTS audio READY (cache HIT) at perf={_lat_t3.perf_counter():.6f}s", flush=True)
+            media_type = "audio/wav" if cached_audio.startswith(b"RIFF") else "audio/mpeg"
+            filename = "tts_response.wav" if media_type == "audio/wav" else "tts_response.mp3"
+            return Response(
+                content=cached_audio,
+                media_type=media_type,
+                headers={
+                    "Content-Disposition": f"inline; filename={filename}",
+                    "X-Audio-Length": str(len(cached_audio)),
+                    "X-TTS-Provider": "cache",
+                    "X-TTS-Cache": "HIT",
+                },
+            )
+
+    # Dynamic Active TTS model resolution from ModelManager
+    active_tts = get_model_manager().get_active_model("tts") or {}
+    active_tts_model = (request.model or active_tts.get("model_id") or active_tts.get("id") or "aura-asteria-en").strip()
+    active_tts_provider = (active_tts.get("provider") or "").lower()
+    active_tts_key = active_tts.get("api_key")
+
+    # Engine routing:
+    # - Hindi and Marathi ALWAYS route to Sarvam Bulbul v3 (Deepgram Aura only supports English).
+    # - English routes to Deepgram Aura by default, or Sarvam if explicitly requested.
+    if is_hindi or is_marathi:
+        use_sarvam = True
+    elif request.model and any(sv in request.model.lower() for sv in ("bulbul", "sarvam")):
+        use_sarvam = True
+    elif active_tts_provider in ("sarvam ai", "sarvam") and "bulbul" in active_tts_model.lower() and not request.model:
+        use_sarvam = True
+    else:
+        use_sarvam = False
+
     if use_sarvam:
-        if is_module1:
-            if is_hindi:
-                sarvam_lang = "hi-IN"
-                chosen_voice = (
-                    request.speaker
-                    if (request.speaker and request.speaker.lower() not in ("simran", "default"))
-                    else os.getenv("SARVAM_MODULE1_HINDI_VOICE", "priya").strip().lower()
+        if is_hindi:
+            sarvam_lang = "hi-IN"
+            chosen_voice = (
+                request.speaker.strip().lower()
+                if (request.speaker and request.speaker.strip().lower() not in ("simran", "default"))
+                else (
+                    "priya" if (is_module1 and not is_module2)
+                    else os.getenv("SARVAM_HINDI_VOICE", "priya").strip().lower()
                 )
-            elif is_marathi:
-                sarvam_lang = "mr-IN"
-                chosen_voice = (
-                    request.speaker
-                    if (request.speaker and request.speaker.lower() not in ("simran", "default"))
-                    else os.getenv("SARVAM_MODULE1_MARATHI_VOICE", "ritu").strip().lower()
+            )
+            if not chosen_voice or chosen_voice in ("simran", "default"):
+                chosen_voice = "priya"
+        elif is_marathi:
+            sarvam_lang = "mr-IN"
+            chosen_voice = (
+                request.speaker.strip().lower()
+                if (request.speaker and request.speaker.strip().lower() not in ("simran", "default"))
+                else (
+                    "ritu" if (is_module1 and not is_module2)
+                    else os.getenv("SARVAM_MARATHI_VOICE", "ritu").strip().lower()
                 )
-            else:
-                sarvam_lang = "en-IN"
-                chosen_voice = request.speaker or os.getenv("SARVAM_ENGLISH_VOICE", "simran").strip().lower()
+            )
+            if not chosen_voice or chosen_voice in ("simran", "default"):
+                chosen_voice = "ritu"
         else:
-            # Module 2 (Knowledge Assistant / Telegram / RAG) - keep unchanged as simran
-            if is_hindi:
-                sarvam_lang = "hi-IN"
-                chosen_voice = request.speaker or os.getenv("SARVAM_HINDI_VOICE", "simran").strip().lower()
-            elif is_marathi:
-                sarvam_lang = "mr-IN"
-                chosen_voice = request.speaker or os.getenv("SARVAM_MARATHI_VOICE", "simran").strip().lower()
-            else:
-                sarvam_lang = "en-IN"
-                chosen_voice = request.speaker or os.getenv("SARVAM_ENGLISH_VOICE", "simran").strip().lower()
+            sarvam_lang = "en-IN"
+            chosen_voice = (
+                request.speaker.strip().lower()
+                if request.speaker
+                else os.getenv("SARVAM_ENGLISH_VOICE", os.getenv("SARVAM_MODULE1_ENGLISH_VOICE", "simran")).strip().lower()
+            )
+            if not chosen_voice or chosen_voice == "default":
+                chosen_voice = "simran"
 
         try:
-            sarvam_service = SarvamTTSService()
+            sarvam_service = get_sarvam_tts_service(api_key=active_tts_key)
             audio_bytes = await sarvam_service.synthesize_speech(
                 clean_text,
                 language_code=sarvam_lang,
                 speaker=chosen_voice,
-                model="bulbul:v3",
+                model=active_tts_model if "bulbul" in active_tts_model else "bulbul:v3",
             )
+            print(f"[LATENCY] T7 TTS audio READY (sarvam) at perf={_lat_t3.perf_counter():.6f}s (took={(_lat_t3.perf_counter()-_lat_t3_start)*1000:.3f}ms)", flush=True)
+            if is_module1 and not is_module2:
+                set_cached_tts_audio(cache_key, audio_bytes)
             media_type = "audio/wav" if audio_bytes.startswith(b"RIFF") else "audio/mpeg"
             filename = "tts_response.wav" if media_type == "audio/wav" else "tts_response.mp3"
             return Response(
@@ -1880,20 +2996,58 @@ async def tts_endpoint(request: TTSRequest):
             lang_label = "English" if is_english else ("Hindi" if is_hindi else "Marathi")
             module_label = "Module 2" if is_module2 else "Module 1"
             logger.warning(
-                f"[{module_label} TTS] Sarvam Bulbul v3 {lang_label} ({sarvam_lang}) failed or out of credits ({str(sarvam_err)}). "
-                "Automatically falling back to Deepgram TTS."
+                f"[{module_label} TTS] Sarvam Bulbul v3 {lang_label} ({sarvam_lang}) unavailable ({str(sarvam_err)})."
             )
-            # Fall through to DeepgramTTSService below
+            if is_hindi or is_marathi:
+                # Return structured JSON instructing client to speak via native browser Web Speech API
+                # Never fall back to Romanized Hindi/Marathi or American English phonetic speech!
+                return JSONResponse(
+                    content={
+                        "fallback_to_browser": True,
+                        "language": sarvam_lang,
+                        "text": clean_text,
+                        "speaker": chosen_voice,
+                        "message": "Sarvam TTS quota unavailable. Use native browser speech synthesis."
+                    },
+                    status_code=200,
+                    headers={"X-TTS-Fallback": "browser-speech-synthesis"}
+                )
+            # For English: fall through to Deepgram Aura TTS
 
-    # Default / Automatic Fallback: Deepgram Aura TTS
+    # Guard: Never send Hindi/Marathi or Devanagari text to English Deepgram Aura!
+    if is_hindi or is_marathi or has_devanagari:
+        fallback_lang = "hi-IN" if is_hindi else "mr-IN"
+        fallback_speaker = "priya" if is_hindi else "ritu"
+        logger.warning(
+            f"Devanagari text routed to Deepgram Aura fallback blocked. Returning browser speech synthesis fallback for {fallback_lang}."
+        )
+        return JSONResponse(
+            content={
+                "fallback_to_browser": True,
+                "language": fallback_lang,
+                "text": clean_text,
+                "speaker": fallback_speaker,
+                "message": "Devanagari text cannot be synthesized by English Deepgram Aura. Use native browser speech synthesis."
+            },
+            status_code=200,
+            headers={"X-TTS-Fallback": "browser-speech-synthesis"}
+        )
+
+    # Default / English Engine: Deepgram Aura TTS (140ms ultra-low latency female voice aura-asteria-en)
     try:
-        tts_service = DeepgramTTSService()
+        effective_dg_model = request.model if (request.model and "aura" in request.model.lower()) else (
+            active_tts_model if "aura" in active_tts_model.lower() else "aura-asteria-en"
+        )
+        tts_service = DeepgramTTSService(api_key=active_tts_key) if (active_tts_key and active_tts_provider == "deepgram") else DeepgramTTSService()
         audio_bytes = await tts_service.synthesize_speech(
             clean_text,
-            model=request.model if request.model != "bulbul:v3" else None,
-            language=request.language,
+            model=effective_dg_model,
+            language="en",
             skip_sarvam=True,
         )
+        print(f"[LATENCY] T7 TTS audio READY (deepgram) at perf={_lat_t3.perf_counter():.6f}s (took={(_lat_t3.perf_counter()-_lat_t3_start)*1000:.3f}ms)", flush=True)
+        if is_module1 and not is_module2:
+            set_cached_tts_audio(cache_key, audio_bytes)
         media_type = "audio/wav" if audio_bytes.startswith(b"RIFF") else "audio/mpeg"
         filename = "tts_response.wav" if media_type == "audio/wav" else "tts_response.mp3"
         return Response(
@@ -2140,9 +3294,150 @@ async def telegram_set_webhook_endpoint(request: Request):
         )
 
 
+# ============================================================================
+# MODEL MANAGEMENT API (STT, LLM, TTS)
+# ============================================================================
+
+from services.model_manager import (
+    get_model_manager,
+    get_active_model,
+    get_active_model_id,
+    get_active_model_key,
+    get_active_model_config,
+)
 
 
+class CreateModelRequest(BaseModel):
+    category: str = Field(..., description="stt, llm, or tts")
+    name: str = Field(..., description="Human-friendly model name or identifier")
+    api_key: Optional[str] = Field(default=None, description="API Key for the model")
+    provider: Optional[str] = Field(default=None, description="Provider name e.g. OpenRouter, Deepgram, Sarvam AI, Custom")
+    model_id: Optional[str] = Field(default=None, description="Exact API model string identifier")
+    description: Optional[str] = Field(default=None, description="Optional description of model capabilities")
+    configuration: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Configuration parameters JSON")
+    is_active: Optional[bool] = Field(default=False, description="Whether to activate immediately")
 
 
+class UpdateModelRequest(BaseModel):
+    name: Optional[str] = None
+    api_key: Optional[str] = None
+    provider: Optional[str] = None
+    model_id: Optional[str] = None
+    category: Optional[str] = None
+    description: Optional[str] = None
+    configuration: Optional[Dict[str, Any]] = None
+    is_active: Optional[bool] = None
 
 
+class ActivateModelRequest(BaseModel):
+    category: str = Field(..., description="stt, llm, or tts")
+    model_id: str = Field(..., description="ID of the model to activate")
+
+
+@app.get("/api/models", tags=["Model Management"])
+async def list_models_endpoint(category: Optional[str] = None):
+    """Lists all registered models (STT, LLM, TTS), optionally filtered by category."""
+    manager = get_model_manager()
+    models = manager.get_all_models(category=category)
+    return {"status": "success", "models": models}
+
+
+@app.get("/api/models/active", tags=["Model Management"])
+async def get_active_models_endpoint():
+    """Returns the currently active model for STT, LLM, and TTS."""
+    manager = get_model_manager()
+    active = manager.get_active_models()
+    return {"status": "success", "active": active}
+
+
+@app.post("/api/models", status_code=status.HTTP_201_CREATED, tags=["Model Management"])
+async def create_model_endpoint(req: CreateModelRequest):
+    """Registers a new custom model using Category, Model Name, and API Key."""
+    manager = get_model_manager()
+    try:
+        new_model = manager.add_model(
+            category=req.category,
+            name=req.name,
+            api_key=req.api_key,
+            provider=req.provider,
+            model_id=req.model_id,
+            configuration=req.configuration,
+            description=req.description,
+            set_active=bool(req.is_active),
+        )
+        return {"status": "success", "model": new_model}
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as e:
+        logger.error(f"[create_model_endpoint] Error creating model: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.put("/api/models/{model_id}", tags=["Model Management"])
+async def update_model_endpoint(model_id: str, req: UpdateModelRequest):
+    """Updates an existing model configuration or parameters."""
+    manager = get_model_manager()
+    try:
+        update_data = {k: v for k, v in req.dict().items() if v is not None}
+        updated = manager.update_model(model_id=model_id, data=update_data)
+        return {"status": "success", "model": updated}
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as e:
+        logger.error(f"[update_model_endpoint] Error updating model {model_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.delete("/api/models/{model_id}", tags=["Model Management"])
+async def delete_model_endpoint(model_id: str):
+    """Permanently deletes any model (built-in or custom). If active, clears active selection."""
+    manager = get_model_manager()
+    try:
+        manager.delete_model(model_id=model_id)
+        return {
+            "status": "success",
+            "message": f"Model '{model_id}' deleted successfully.",
+            "deleted_id": model_id
+        }
+    except ValueError as ve:
+        message = str(ve)
+        if "does not exist" in message:
+            code = status.HTTP_404_NOT_FOUND
+        else:
+            code = status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=code, detail=message)
+    except Exception as e:
+        logger.error(f"[delete_model_endpoint] Error deleting model {model_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.post("/api/models/restore-defaults", tags=["Model Management"])
+async def restore_defaults_endpoint():
+    """Restores missing default built-in models and restores default active models if unassigned."""
+    manager = get_model_manager()
+    try:
+        models = manager.restore_defaults()
+        active = manager.get_active_models()
+        return {
+            "status": "success",
+            "message": "Default models restored successfully.",
+            "models": models,
+            "active": active
+        }
+    except Exception as e:
+        logger.error(f"[restore_defaults_endpoint] Error restoring defaults: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@app.post("/api/models/activate", tags=["Model Management"])
+async def activate_model_endpoint(req: ActivateModelRequest):
+    """Activates a model for the given category (STT, LLM, or TTS)."""
+    manager = get_model_manager()
+    try:
+        activated = manager.set_active_model(category=req.category, model_id=req.model_id)
+        return {"status": "success", "active": activated}
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as e:
+        logger.error(f"[activate_model_endpoint] Error activating model {req.model_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))

@@ -20,3 +20,6 @@ out/
 # OS
 .DS_Store
 Thumbs.db
+
+# Kilo worktrees
+.kilo/worktrees/

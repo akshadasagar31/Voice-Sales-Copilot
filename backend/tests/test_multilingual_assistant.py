@@ -59,10 +59,13 @@ def test_detect_language_marathi():
     assert detect_language("सगळे नियम सांगा") == LANG_MR
 
 
-def test_detect_language_romanized():
-    """Verify transliterated / Romanized Hindi and Marathi detection."""
-    assert detect_language("namaste aap kaise ho") == LANG_HI
-    assert detect_language("namaskar kasa ahes") == LANG_MR
+def test_detect_language_pure_devanagari_and_latin_rejection():
+    """Verify pure Devanagari detection and that Latin text without English words is not falsely classified."""
+    assert detect_language("नमस्ते आप कैसे हैं") == LANG_HI
+    assert detect_language("नमस्कार कसे आहात") == LANG_MR
+    from services.language import detect_spoken_language
+    # Latin text with insufficient confidence and no English words is unclear, not English
+    assert detect_spoken_language("namaste aap kaise ho", confidence=0.4) == "unclear"
 
 
 # ---------------------------------------------------------------------------
@@ -426,42 +429,31 @@ async def test_stt_transcribe_audio_returns_detected_language():
 
 @pytest.mark.asyncio
 async def test_tts_synthesize_multilingual_speech():
-    """Verify DeepgramTTSService synthesizes speech with language parameter."""
+    """Verify DeepgramTTSService synthesizes English speech and protects Indic speech from phonetic fallback."""
+    from services.tts import DeepgramTTSError
     service = DeepgramTTSService(api_key="fake-tts-key")
 
     mock_response = MagicMock()
     mock_response.status_code = 200
-    mock_response.content = b"FAKE_HINDI_MP3_AUDIO"
+    mock_response.content = b"FAKE_ENGLISH_MP3_AUDIO"
 
     with patch("httpx.AsyncClient.post", return_value=mock_response) as mock_post:
         audio = await service.synthesize_speech(
-            "नमस्ते, मैं आपकी क्या सहायता कर सकता हूँ?",
-            language="hi",
+            "Hello, how can I help you today?",
+            language="en",
         )
-        assert audio == b"FAKE_HINDI_MP3_AUDIO"
+        assert audio == b"FAKE_ENGLISH_MP3_AUDIO"
         assert mock_post.called
-        call_kwargs = mock_post.call_args[1]
-        assert "Namaste" in call_kwargs["json"]["text"] or "नमस्ते" in call_kwargs["json"]["text"]
 
-
-def test_devanagari_to_phonetic_hindi_and_marathi():
-    """Verify Devanagari text transliteration produces natural phonetic Latin text for TTS."""
-    from services.language import devanagari_to_phonetic
-
-    hindi_text = "नमस्ते, मैं आपकी सहायता कर सकता हूँ"
-    phonetic_hi = devanagari_to_phonetic(hindi_text)
-    assert "Namaste" in phonetic_hi
-    assert "sahaayataa" in phonetic_hi or "sahayata" in phonetic_hi
-
-    marathi_text = "नमस्कार, आम्ही मदत करू शकतो"
-    phonetic_mr = devanagari_to_phonetic(marathi_text)
-    assert "Namaskar" in phonetic_mr
-    assert "shakato" in phonetic_mr or "shakt" in phonetic_mr
+    # Devanagari speech directly to Deepgram Aura must raise DeepgramTTSError
+    with pytest.raises(DeepgramTTSError):
+        await service.synthesize_speech("नमस्ते", language="hi", skip_sarvam=True)
 
 
 @pytest.mark.asyncio
 async def test_tts_model_routing_per_language():
-    """Verify language-specific Deepgram Aura model selection for en, hi, mr."""
+    """Verify English routes to aura-asteria-en and Devanagari speech requires Sarvam/browser speech."""
+    from services.tts import DeepgramTTSError
     service = DeepgramTTSService(api_key="fake-tts-key")
     mock_response = MagicMock(status_code=200, content=b"AUDIO")
 
@@ -470,13 +462,8 @@ async def test_tts_model_routing_per_language():
         await service.synthesize_speech("Hello", language="en")
         assert "model=aura-asteria-en" in mock_post.call_args[0][0]
 
-        # Hindi -> aura-luna-en
-        await service.synthesize_speech("नमस्ते", language="hi")
-        assert "model=aura-luna-en" in mock_post.call_args[0][0]
-
-        # Marathi -> aura-stella-en
-        await service.synthesize_speech("नमस्कार", language="mr")
-        assert "model=aura-stella-en" in mock_post.call_args[0][0]
+    with pytest.raises(DeepgramTTSError):
+        await service.synthesize_speech("नमस्कार", language="mr", skip_sarvam=True)
 
 
 @pytest.mark.asyncio

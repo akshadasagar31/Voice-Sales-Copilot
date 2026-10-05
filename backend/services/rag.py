@@ -36,6 +36,8 @@ else:
 from services.retriever import VectorRetriever
 from services.language import (
     detect_language,
+    detect_spoken_language,
+    count_devanagari_chars,
     is_greeting,
     get_fallback_message,
     get_empty_kb_greeting,
@@ -64,9 +66,9 @@ Your task is to answer the user's question STRICTLY and ONLY using the provided 
 CRITICAL RULES:
 1. Base your answer EXCLUSIVELY on the provided Context. Translate and synthesize the facts from the English Context into natural {language_name}. Do NOT use outside knowledge, assumptions, or hallucinations.
 2. DO NOT include any greeting (such as "Hello", "Hi", "नमस्ते", "नमस्कार", "Welcome", "Thank you for asking", etc.) or conversational preamble. Start immediately with the direct factual answer so speech synthesis can begin right away.
-3. If the answer is not present in the provided context, or if the context does not contain sufficient information to answer the question, you MUST respond EXACTLY with this phrase and nothing else:
+3. If the answer is not present in the provided context, or if the context does not contain sufficient information to answer the question, or if the question is unrelated to the context (e.g. general trivia, math, world facts, or topics not in the documentation), you MUST respond EXACTLY with this phrase and nothing else:
 "{fallback_message}"
-4. Do NOT provide apologies, caveats, or speculation beyond the exact fallback phrase if the answer is missing.
+4. You are strictly FORBIDDEN from answering using general LLM knowledge or answering unrelated questions. Never speculate, apologize, or provide caveats beyond the exact fallback phrase.
 5. If the context answers the question, provide a concise, direct, and professional answer in {language_name} in 1 to 3 clear sentences."""
 
 # Low-Latency Grounded prompt specifically for Voice Streaming (minimizes prompt processing TTFT)
@@ -77,9 +79,10 @@ Answer the user's question directly, accurately, and truthfully in 1 to 2 clear 
 CRITICAL RULES:
 1. Base your answer EXCLUSIVELY on the provided Context. Translate and synthesize the facts from the English Context into natural {language_name}. Do NOT use outside knowledge or assumptions.
 2. Start IMMEDIATELY with the direct factual answer. NEVER include greetings, pleasantries, or preamble.
-3. If the answer is not present in the context, you MUST respond EXACTLY with this phrase and nothing else:
+3. If the answer is not present in the context, or if the documentation does not contain sufficient information, or if the question is unrelated to the documentation (e.g. general trivia, math, world facts, or topics not in the documentation), you MUST respond EXACTLY with this phrase and nothing else:
 "{fallback_message}"
-4. Keep the answer concise (1 to 2 sentences) for instant spoken response."""
+4. Do NOT answer unrelated topics or general trivia from general LLM knowledge. Output ONLY the exact fallback phrase.
+5. Keep the answer concise (1 to 2 sentences) for instant spoken response."""
 
 # Grounded prompt for Greetings (Greets warmly, then gives grounded topic recommendations)
 GREETING_SYSTEM_PROMPT = """You are a helpful, warm, and professional sales assistant for Voice Sales Copilot.
@@ -187,11 +190,23 @@ class RAGService:
         http_client: Optional[httpx.Client] = None,
     ):
         self.retriever = retriever or VectorRetriever()
+        active_llm_obj = None
+        active_llm = DEFAULT_MODEL
+        active_key = None
+        try:
+            from services.model_manager import get_model_manager
+            active_llm_obj = get_model_manager().get_active_model("llm")
+            if active_llm_obj:
+                active_llm = active_llm_obj.get("model_id") or DEFAULT_MODEL
+                active_key = active_llm_obj.get("api_key")
+        except Exception:
+            pass
+
         self.api_key = (
-            api_key if api_key is not None else os.getenv("OPENROUTER_API_KEY", "")
+            api_key if api_key is not None else (active_key or os.getenv("OPENROUTER_API_KEY", ""))
         ).strip()
         self.model = (
-            model or os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
+            model or active_llm or os.getenv("OPENROUTER_MODEL", DEFAULT_MODEL)
         ).strip().lstrip("~")
         self.fallback_model = (
             fallback_model or os.getenv("RAG_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL)
@@ -270,11 +285,21 @@ class RAGService:
             else (getattr(self.retriever.pinecone_service, "namespace", None) or os.getenv("PINECONE_NAMESPACE", "sales_playbooks"))
         )
 
-        # Detect or assign language
-        detected_lang = detect_language(clean_question)
-        target_lang = (language or detected_lang).strip().lower()
+        # Detect or assign language strictly from the current turn query
+        detected_lang = detect_spoken_language(clean_question)
+        dev_count = count_devanagari_chars(clean_question) if clean_question else 0
+        if dev_count >= 1:
+            target_lang = detected_lang if detected_lang in ("hi", "mr") else ("mr" if language == "mr" else "hi")
+        elif detected_lang == "en":
+            # Current turn query is English - never inherit previous Hindi/Marathi language
+            target_lang = "en"
+        elif language and language.strip().lower() in ("en", "hi", "mr"):
+            target_lang = language.strip().lower()
+        else:
+            target_lang = detected_lang or "en"
+
         if target_lang not in LANGUAGE_NAMES:
-            target_lang = detected_lang
+            target_lang = detected_lang if detected_lang in LANGUAGE_NAMES else "en"
         lang_name = LANGUAGE_NAMES.get(target_lang, "English")
 
         # Determine greeting intent
@@ -378,7 +403,13 @@ class RAGService:
                 "the provided information is not available",
                 "provided documentation does not contain",
             ]
-            contains_fallback = any(ind in raw_answer.lower() for ind in fallback_indicators)
+            greeting_markers = ("hello", "hi", "welcome", "greetings", "good morning", "good afternoon", "good evening")
+            missing_en_greeting = (target_lang == LANG_EN and not any(g in raw_answer.lower() for g in greeting_markers))
+            contains_fallback = (
+                any(ind in raw_answer.lower() for ind in fallback_indicators)
+                or (target_lang in (LANG_HI, LANG_MR) and count_devanagari_chars(raw_answer) == 0)
+                or missing_en_greeting
+            )
 
             greeting_answer = (
                 generate_grounded_greeting_response(target_lang, chunks)
@@ -429,9 +460,12 @@ class RAGService:
             else get_fallback_message(target_lang)
         )
 
-        # If no chunks retrieved, return fallback message directly without calling LLM
-        if not chunks:
-            logger.info("No relevant chunks retrieved from knowledge base. Returning fallback message.")
+        # If no chunks retrieved or relevance score is below minimum threshold, return fallback message directly without calling LLM
+        MIN_RELEVANCE_THRESHOLD = 0.32
+        scores = [float(c["score"]) for c in chunks if c.get("score") is not None]
+        has_low_relevance = (max(scores) < MIN_RELEVANCE_THRESHOLD) if scores else False
+        if not chunks or has_low_relevance:
+            logger.info("Chunks below relevance threshold. Returning fallback message.")
             return {
                 "question": clean_question,
                 "answer": active_fallback,
@@ -570,10 +604,26 @@ class RAGService:
                 raise OpenRouterAPIError(f"Malformed response received from OpenRouter API: {str(parse_err)}") from parse_err
 
         # Check if model triggered fallback
+        fallback_indicators = [
+            "information is not available",
+            "not contain sufficient information",
+            "पर्याप्त जानकारी उपलब्ध नहीं है",
+            "पुरेशी माहिती उपलब्ध नाही",
+            "not available in the context",
+            "not provided in the context",
+            "not mentioned in the context",
+            "not mentioned in the documentation",
+            "not available in the documentation",
+            "the provided information is not available",
+            "provided documentation does not contain",
+            "documentation does not provide",
+            "does not contain information",
+        ]
         fallback_used = (
             raw_answer.strip() == active_fallback.strip()
             or active_fallback.lower() in raw_answer.lower()
             or DEFAULT_FALLBACK_MESSAGE.lower() in raw_answer.lower()
+            or any(ind in raw_answer.lower() for ind in fallback_indicators)
         )
         final_answer = active_fallback if fallback_used else raw_answer
 
@@ -649,10 +699,21 @@ class RAGService:
             else (getattr(self.retriever.pinecone_service, "namespace", None) or os.getenv("PINECONE_NAMESPACE", "sales_playbooks"))
         )
 
-        detected_lang = detect_language(clean_question)
-        target_lang = (language or detected_lang).strip().lower()
+        # Determine language strictly from current turn query
+        detected_lang = detect_spoken_language(clean_question)
+        dev_count = count_devanagari_chars(clean_question) if clean_question else 0
+        if dev_count >= 1:
+            target_lang = detected_lang if detected_lang in ("hi", "mr") else ("mr" if language == "mr" else "hi")
+        elif detected_lang == "en":
+            # Current turn query is English - never inherit previous Hindi/Marathi language
+            target_lang = "en"
+        elif language and language.strip().lower() in ("en", "hi", "mr"):
+            target_lang = language.strip().lower()
+        else:
+            target_lang = detected_lang or "en"
+
         if target_lang not in LANGUAGE_NAMES:
-            target_lang = detected_lang
+            target_lang = detected_lang if detected_lang in LANGUAGE_NAMES else "en"
         lang_name = LANGUAGE_NAMES.get(target_lang, "English")
 
         user_is_greeting = is_greeting(clean_question)
@@ -713,8 +774,11 @@ class RAGService:
             else get_fallback_message(target_lang)
         )
 
-        # Handle zero chunks cases
-        if not chunks:
+        # Handle zero chunks or insufficient documentation cases
+        MIN_RELEVANCE_THRESHOLD = 0.32
+        scores = [float(c["score"]) for c in chunks if c.get("score") is not None] if chunks else []
+        has_low_relevance = (max(scores) < MIN_RELEVANCE_THRESHOLD) if scores else False
+        if not chunks or (not user_is_greeting and has_low_relevance):
             if user_is_greeting:
                 msg = get_empty_kb_greeting(target_lang)
             else:
@@ -968,12 +1032,37 @@ class RAGService:
                     return
 
         final_raw = "".join(streamed_chunks).strip()
+        fallback_indicators = [
+            "information is not available",
+            "not contain sufficient information",
+            "पर्याप्त जानकारी उपलब्ध नहीं है",
+            "पुरेशी माहिती उपलब्ध नाही",
+            "not available in the context",
+            "not provided in the context",
+            "not mentioned in the context",
+            "not mentioned in the documentation",
+            "not available in the documentation",
+            "the provided information is not available",
+            "provided documentation does not contain",
+            "documentation does not provide",
+            "does not contain information",
+        ]
         fallback_used = (
             final_raw.strip() == active_fallback.strip()
             or active_fallback.lower() in final_raw.lower()
             or DEFAULT_FALLBACK_MESSAGE.lower() in final_raw.lower()
+            or any(ind in final_raw.lower() for ind in fallback_indicators)
         )
-        final_answer = active_fallback if fallback_used else final_raw
+        if user_is_greeting:
+            greeting_markers = ("hello", "hi", "welcome", "greetings", "good morning", "good afternoon", "good evening")
+            missing_en_greeting = (target_lang == LANG_EN and not any(g in final_raw.lower() for g in greeting_markers))
+            if fallback_used or (target_lang in (LANG_HI, LANG_MR) and count_devanagari_chars(final_raw) == 0) or missing_en_greeting:
+                final_answer = generate_grounded_greeting_response(target_lang, chunks)
+                fallback_used = False
+            else:
+                final_answer = final_raw
+        else:
+            final_answer = active_fallback if fallback_used else final_raw
 
         done_payload = {
             "question": clean_question,

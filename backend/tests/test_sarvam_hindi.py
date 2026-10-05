@@ -149,22 +149,17 @@ def test_api_tts_routes_module2_hindi_to_sarvam(client):
         assert response.status_code == 200
         assert response.headers["x-tts-provider"] == "sarvam"
         assert response.headers["x-tts-language"] == "hi-IN"
-        assert response.headers["x-tts-voice"] == "simran"
+        assert response.headers["x-tts-voice"] == "priya"
         mock_sarvam.assert_called_once()
 
 
-def test_api_tts_module2_hindi_falls_back_to_deepgram_on_sarvam_error(client):
-    """Verify that if Sarvam TTS fails or runs out of credits for Module 2 Hindi, it automatically falls back to Deepgram."""
-    mock_mp3_bytes = b"ID3\x03\x00\x00\x00\x00\x00#TSSEfake_deepgram_hindi_mp3"
+def test_api_tts_module2_hindi_falls_back_to_browser_on_sarvam_error(client):
+    """Verify that if Sarvam TTS fails or runs out of credits for Module 2 Hindi, it falls back to native browser speech synthesis."""
     with patch.object(
         SarvamTTSService,
         "synthesize_speech",
         side_effect=SarvamTTSAPIError(402, "No credits available."),
-    ), patch(
-        "services.tts.DeepgramTTSService.synthesize_speech",
-        new_callable=AsyncMock,
-        return_value=mock_mp3_bytes,
-    ) as mock_deepgram:
+    ):
         response = client.post(
             "/api/tts",
             json={
@@ -175,9 +170,11 @@ def test_api_tts_module2_hindi_falls_back_to_deepgram_on_sarvam_error(client):
         )
 
         assert response.status_code == 200
-        assert response.headers["x-tts-provider"] == "deepgram"
-        assert response.content == mock_mp3_bytes
-        mock_deepgram.assert_called_once()
+        assert response.headers["x-tts-fallback"] == "browser-speech-synthesis"
+        data = response.json()
+        assert data["fallback_to_browser"] is True
+        assert data["language"] == "hi-IN"
+        assert "एचडीएफसी" in data["text"]
 
 
 # ============================================================================
