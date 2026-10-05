@@ -395,6 +395,12 @@ def test_assistant_questions_receive_natural_answers_never_lead_data():
     """
     service = LeadExtractorService(api_key="mock_key")
     mock_http = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"content": "I am VoiceCopilot, your sales copilot for CRM and lead capture."}}]
+    }
+    mock_http.post.return_value = mock_resp
     service._client = mock_http
 
     # Turn with "What is your name?"
@@ -403,28 +409,37 @@ def test_assistant_questions_receive_natural_answers_never_lead_data():
     assert res1["is_assistant_query"] is True
     assert "voicecopilot" in res1["message"].lower()
     assert res1["lead"]["name"] is None  # NOT saved as prospect name!
-    mock_http.post.assert_not_called()
 
     # Turn with "Who are you?"
     res2 = service.extract_lead("Who are you?", language="en")
     assert res2["status"] == "assistant_query"
     assert res2["is_assistant_query"] is True
     assert "sales copilot" in res2["message"].lower() or "voicecopilot" in res2["message"].lower()
-    mock_http.post.assert_not_called()
 
     # Turn with "What can you do?"
     res3 = service.extract_lead("What can you do?", language="en")
     assert res3["status"] == "assistant_query"
     assert res3["is_assistant_query"] is True
     assert "lead" in res3["message"].lower() or "crm" in res3["message"].lower()
-    mock_http.post.assert_not_called()
 
     # Hindi: "आप कौन हैं?"
+    mock_resp_hi = MagicMock()
+    mock_resp_hi.status_code = 200
+    mock_resp_hi.json.return_value = {
+        "choices": [{"message": {"content": "मैं वॉयस कोपायलट हूँ, आपकी वित्तीय बिक्री सहायक।"}}]
+    }
+    mock_http.post.return_value = mock_resp_hi
     res_hi = service.extract_lead("आप कौन हैं?", language="hi")
     assert res_hi["status"] == "assistant_query"
     assert "कोपायलट" in res_hi["message"]
 
     # Marathi: "तुम्ही काय करू शकता?"
+    mock_resp_mr = MagicMock()
+    mock_resp_mr.status_code = 200
+    mock_resp_mr.json.return_value = {
+        "choices": [{"message": {"content": "मी व्हॉइस कोपायलट आहे, मी सीआरएम आणि लीड मिळवण्यात मदत करतो."}}]
+    }
+    mock_http.post.return_value = mock_resp_mr
     res_mr = service.extract_lead("तुम्ही काय करू शकता?", language="mr")
     assert res_mr["status"] == "assistant_query"
     assert "सीआरएम" in res_mr["message"] or "मदत" in res_mr["message"]

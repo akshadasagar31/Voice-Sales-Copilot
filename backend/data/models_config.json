@@ -6,24 +6,6 @@
   },
   "models": [
     {
-      "id": "deepgram-nova-3",
-      "name": "Deepgram Nova-3",
-      "category": "stt",
-      "provider": "Deepgram",
-      "model_id": "nova-3",
-      "description": "Multilingual low-latency STT (English, Hindi, Marathi with domain biasing)",
-      "is_builtin": true,
-      "is_active": true,
-      "configuration": {
-        "smart_format": true,
-        "punctuate": true,
-        "encoding": "linear16",
-        "sample_rate": 48000
-      },
-      "created_at": "2026-01-01T00:00:00Z",
-      "updated_at": "2026-10-02T11:12:40.718809+00:00"
-    },
-    {
       "id": "deepgram-nova-2",
       "name": "Deepgram Nova-2",
       "category": "stt",
@@ -39,7 +21,7 @@
         "sample_rate": 48000
       },
       "created_at": "2026-01-01T00:00:00Z",
-      "updated_at": "2026-10-02T11:12:40.718824+00:00"
+      "updated_at": "2026-10-05T06:05:32.982358+00:00"
     },
     {
       "id": "sarvam-saaras-v4",
@@ -55,7 +37,7 @@
         "model": "saaras:v4"
       },
       "created_at": "2026-01-01T00:00:00Z",
-      "updated_at": "2026-10-02T11:12:40.718827+00:00"
+      "updated_at": "2026-10-05T06:05:32.982367+00:00"
     },
     {
       "id": "sarvam-saaras-v2",
@@ -71,7 +53,7 @@
         "model": "saaras:v2"
       },
       "created_at": "2026-01-01T00:00:00Z",
-      "updated_at": "2026-10-02T11:12:40.718829+00:00"
+      "updated_at": "2026-10-05T06:05:32.982369+00:00"
     },
     {
       "id": "deepseek-chat",
@@ -216,7 +198,7 @@
       "is_active": false,
       "configuration": {},
       "created_at": "2026-09-28T08:23:08.774138+00:00",
-      "updated_at": "2026-10-02T11:12:40.718834+00:00"
+      "updated_at": "2026-10-05T06:05:32.982371+00:00"
     },
     {
       "id": "custom-openrouter-groq",
@@ -248,7 +230,25 @@
       },
       "created_at": "2026-01-01T00:00:00Z",
       "updated_at": "2026-01-01T00:00:00Z"
+    },
+    {
+      "id": "deepgram-nova-3",
+      "name": "Deepgram Nova-3",
+      "category": "stt",
+      "provider": "Deepgram",
+      "model_id": "nova-3",
+      "description": "Multilingual low-latency STT (English, Hindi, Marathi with domain biasing)",
+      "is_builtin": true,
+      "is_active": true,
+      "configuration": {
+        "smart_format": true,
+        "punctuate": true,
+        "encoding": "linear16",
+        "sample_rate": 48000
+      },
+      "created_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z"
     }
   ],
-  "updated_at": "2026-10-05T05:59:45.575766+00:00"
+  "updated_at": "2026-10-05T06:05:33.001687+00:00"
 }
